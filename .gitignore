@@ -1,8 +1,33 @@
+# Env
 .env
+
+# Python
 __pycache__/
 *.pyc
+*.pyo
+
+# Virtual env
 .venv/
+venv/
+
+# Build
 *.egg-info/
+dist/
+build/
+
+# OS
 .DS_Store
+
+# ML / models
 checkpoints/
 *.safetensors
+
+# Logs
+*.log
+
+# IDE
+.vscode/
+.idea/
+
+# Claude (optional)
+.claude/
