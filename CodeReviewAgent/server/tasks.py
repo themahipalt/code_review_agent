@@ -367,6 +367,8 @@ class DataPipeline:
                 "category": "security",
                 "severity": "critical",
                 "weight": 1.0,
+                # Reveals batch endpoint docs — shows N+1 was also avoidable
+                "unlocks": "api_docs_hint",
             },
             {
                 "id": "n_plus_one_requests",
@@ -391,6 +393,8 @@ class DataPipeline:
                 "category": "security",
                 "severity": "error",
                 "weight": 0.75,
+                # Reveals network topology — confirms direct internet exposure
+                "unlocks": "network_topology_hint",
             },
             {
                 "id": "missing_key_error_handling",
@@ -442,6 +446,30 @@ class DataPipeline:
             },
         ],
         "correct_decision": "request_changes",
+        # ── Causal context hints ──────────────────────────────────────────
+        # Finding the hardcoded API key reveals the upstream API docs, showing
+        # a bulk endpoint exists — making the N+1 pattern even more damning.
+        # Finding the SSL issue reveals the network topology, confirming the
+        # service is directly internet-facing with no TLS termination proxy.
+        "context_hints": {
+            "api_docs_hint": (
+                "=== UNLOCKED: Upstream API Documentation (excerpt) ===\n"
+                "  GET  /items/{id}          — fetch a single item\n"
+                "  POST /items/batch         — fetch up to 500 items in one request\n"
+                "    body: {\"ids\": [1, 2, ...]}\n"
+                "NOTE: A batch endpoint already exists. The current code issues one\n"
+                "request per item instead of using /items/batch, amplifying the\n"
+                "credential-exposure risk: every request carries the leaked API_KEY."
+            ),
+            "network_topology_hint": (
+                "=== UNLOCKED: Deployment Network Map ===\n"
+                "  Internet → DataPipeline service (no TLS proxy) → upstream API\n"
+                "  The DataPipeline pod has a public IP and no WAF in front of it.\n"
+                "NOTE: verify=False combined with direct internet exposure means\n"
+                "any network path between the pod and the upstream API is vulnerable\n"
+                "to a man-in-the-middle attack with no detection mechanism."
+            ),
+        },
     },
 
     # ── Task 4: Medium — Async Concurrency ───────────────────────────────
@@ -662,6 +690,8 @@ def admin_panel():
                 "category": "security",
                 "severity": "critical",
                 "weight": 1.0,
+                # Reveals server deployment config — shows shell access = full host compromise
+                "unlocks": "server_config_hint",
             },
             {
                 "id": "path_traversal",
@@ -687,6 +717,8 @@ def admin_panel():
                 "category": "security",
                 "severity": "critical",
                 "weight": 1.0,
+                # Reveals client usage pattern — shows external clients send pickle payloads
+                "unlocks": "client_usage_hint",
             },
             {
                 "id": "credentials_in_logs",
@@ -715,5 +747,256 @@ def admin_panel():
             },
         ],
         "correct_decision": "request_changes",
+        # ── Causal context hints ──────────────────────────────────────────
+        # Finding command_injection reveals the host deployment context,
+        # escalating severity from "code bug" to "full host compromise".
+        # Finding insecure_deserialization reveals client usage patterns,
+        # confirming the /load endpoint is actively used by external scripts.
+        "context_hints": {
+            "server_config_hint": (
+                "=== UNLOCKED: Server Deployment Configuration ===\n"
+                "  The Flask app runs as root inside a Docker container with:\n"
+                "    --privileged flag set\n"
+                "    host network mode (--network=host)\n"
+                "    /var/run/docker.sock mounted read-write\n"
+                "NOTE: Command injection on this host is not just a container escape —\n"
+                "the app runs as root with Docker socket access, giving an attacker\n"
+                "full control of the host and all sibling containers."
+            ),
+            "client_usage_hint": (
+                "=== UNLOCKED: Client Integration Pattern (from internal wiki) ===\n"
+                "  # Example client code used by 3 internal services:\n"
+                "  import pickle, requests\n"
+                "  payload = pickle.dumps(MyObject(user_input))\n"
+                "  requests.post('https://api.internal/load', data=payload)\n"
+                "NOTE: At least 3 internal services send user-controlled pickle\n"
+                "payloads to /load. Any of those services being compromised allows\n"
+                "a lateral-movement RCE attack through this endpoint."
+            ),
+        },
+    },
+
+    # ── Task 6: Causal Chain — Secrets Leak Investigation ────────────────────
+    #
+    # WORLD-MODELING DESIGN
+    # ─────────────────────
+    # This task implements a *causal observation chain*:
+    #
+    #   Phase 1 (lines visible from the start)
+    #     The agent sees a Flask service with two obvious surface issues.
+    #     Finding issue A (hardcoded JWT secret) *unlocks* Phase 2 context.
+    #
+    #   Phase 2 (revealed after issue A is found)
+    #     A hidden DB schema snippet is appended to the observation, exposing
+    #     a privilege-escalation path that only makes sense once the secret
+    #     leak is understood.  This rewards genuine causal reasoning:
+    #       "the leaked secret lets an attacker forge admin tokens → they can
+    #        reach the unguarded /admin/promote endpoint → full privilege
+    #        escalation."
+    #
+    #   Phase 3 (revealed after issue B is found)
+    #     After the agent flags the missing rate-limit, the server's nginx
+    #     config fragment is revealed, showing that /auth is also missing
+    #     the global IP-allowlist — confirming the attack surface is wider
+    #     than the code alone suggests.
+    #
+    # The chained field `"unlocks"` in each issue entry names the context_key
+    # that the environment injects into the observation when that issue is found.
+    # The environment layer reads this and appends the hint to `context_hints`.
+    {
+        "id": 6,
+        "name": "Causal Secrets Leak Investigation",
+        "difficulty": "hard",
+        "file_name": "auth_service.py",
+        "description": (
+            "Review this authentication service carefully. "
+            "Some issues unlock additional context about the wider system — "
+            "read every new hint you receive before continuing. "
+            "Use get_context on any suspicious line to reveal surrounding detail. "
+            "Identify all issues, then submit your review."
+        ),
+        "max_steps": 35,
+        "code": """\
+import jwt
+import sqlite3
+import time
+from flask import Flask, request, jsonify
+
+app = Flask(__name__)
+
+# ---- configuration ----------------------------------------------------------
+JWT_SECRET = "super-secret-jwt-key-do-not-share"   # line 9: hardcoded secret
+JWT_ALGORITHM = "HS256"
+
+# ---- helpers ----------------------------------------------------------------
+
+def create_token(user_id: int, role: str) -> str:
+    payload = {
+        "sub": user_id,
+        "role": role,
+        "exp": time.time() + 3600,
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def verify_token(token: str) -> dict:
+    # line 23: algorithm not pinned — accepts ["none"] attack if lib < 2.0
+    return jwt.decode(token, JWT_SECRET, algorithms=["HS256", "none"])
+
+
+# ---- routes -----------------------------------------------------------------
+
+@app.route("/auth", methods=["POST"])
+def authenticate():
+    \"\"\"Issue a JWT for valid credentials.\"\"\"
+    body  = request.get_json(force=True)
+    uname = body.get("username", "")
+    pwd   = body.get("password", "")
+    # line 33: no rate limiting → brute-force possible
+    conn   = sqlite3.connect("users.db")
+    cursor = conn.cursor()
+    # line 37: f-string SQL → injection
+    cursor.execute(f"SELECT id, role FROM users WHERE username='{uname}' AND password='{pwd}'")
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        return jsonify({"token": create_token(row[0], row[1])})
+    return jsonify({"error": "invalid credentials"}), 401
+
+
+@app.route("/admin/promote", methods=["POST"])
+def promote_user():
+    \"\"\"Promote a user to admin — JWT required.\"\"\"
+    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+    try:
+        claims = verify_token(token)
+    except Exception:
+        return jsonify({"error": "unauthorized"}), 401
+    # line 51: role taken directly from token — no DB re-validation
+    if claims.get("role") == "admin":
+        target = request.json.get("user_id")
+        conn = sqlite3.connect("users.db")
+        conn.execute(f"UPDATE users SET role='admin' WHERE id={target}")   # line 55: injection
+        conn.commit()
+        conn.close()
+        return jsonify({"promoted": target})
+    return jsonify({"error": "forbidden"}), 403
+""",
+        # ── Ground-truth issues ───────────────────────────────────────────
+        "issues": [
+            {
+                "id": "hardcoded_jwt_secret",
+                "description": "JWT_SECRET is hard-coded; anyone with source access can forge tokens",
+                "line_range": (9, 9),
+                "keywords": [
+                    "hardcoded", "hard-coded", "jwt_secret", "secret", "jwt",
+                    "environment variable", "env var", "os.environ", "forge",
+                    "hardcode", "token secret",
+                ],
+                "category": "security",
+                "severity": "critical",
+                "weight": 1.0,
+                # Finding this issue unlocks the DB schema context hint
+                "unlocks": "db_schema_hint",
+            },
+            {
+                "id": "jwt_none_algorithm",
+                "description": (
+                    "jwt.decode accepts 'none' algorithm — attacker can craft an "
+                    "unsigned token and bypass signature verification"
+                ),
+                "line_range": (23, 24),
+                "keywords": [
+                    "none", "algorithm", "alg", "unsigned", "bypass",
+                    "jwt", "signature", "verify", "none algorithm",
+                ],
+                "category": "security",
+                "severity": "critical",
+                "weight": 1.0,
+            },
+            {
+                "id": "no_rate_limit",
+                "description": "/auth endpoint has no rate limiting — susceptible to brute-force",
+                "line_range": (33, 34),
+                "keywords": [
+                    "rate limit", "rate-limit", "brute force", "brute-force",
+                    "throttle", "throttling", "flood", "limit", "attempts",
+                ],
+                "category": "security",
+                "severity": "error",
+                "weight": 0.75,
+                # Finding this unlocks the nginx config hint
+                "unlocks": "nginx_config_hint",
+            },
+            {
+                "id": "sql_injection_auth",
+                "description": "f-string interpolation in SQL query on /auth → injection",
+                "line_range": (37, 38),
+                "keywords": [
+                    "sql injection", "sql", "injection", "f-string", "parameterized",
+                    "sanitize", "escape", "prepared statement", "placeholder",
+                ],
+                "category": "security",
+                "severity": "critical",
+                "weight": 1.0,
+            },
+            {
+                "id": "role_from_token_only",
+                "description": (
+                    "Role is read directly from the JWT payload without re-checking the DB — "
+                    "a forged or stale token grants permanent privilege"
+                ),
+                "line_range": (51, 52),
+                "keywords": [
+                    "role", "token", "db", "database", "re-check", "revalidat",
+                    "stale", "privilege", "escalation", "claims", "payload",
+                    "not verified", "trust",
+                ],
+                "category": "security",
+                "severity": "critical",
+                "weight": 1.0,
+            },
+            {
+                "id": "sql_injection_promote",
+                "description": "f-string SQL in /admin/promote UPDATE query → second-order injection",
+                "line_range": (55, 55),
+                "keywords": [
+                    "sql injection", "sql", "injection", "f-string", "parameterized",
+                    "prepared statement", "placeholder", "update", "second order",
+                ],
+                "category": "security",
+                "severity": "critical",
+                "weight": 1.0,
+            },
+        ],
+        "correct_decision": "request_changes",
+        # ── Causal context hints — revealed progressively ─────────────────
+        # Each value is injected into the observation once the triggering
+        # issue is found.  The agent must incorporate this new information
+        # into its ongoing world model.
+        "context_hints": {
+            "db_schema_hint": (
+                "=== UNLOCKED: Database Schema (users.db) ===\n"
+                "  CREATE TABLE users (\n"
+                "    id       INTEGER PRIMARY KEY,\n"
+                "    username TEXT UNIQUE NOT NULL,\n"
+                "    password TEXT NOT NULL,         -- stored as plaintext!\n"
+                "    role     TEXT DEFAULT 'viewer'  -- 'viewer' | 'editor' | 'admin'\n"
+                "  );\n"
+                "NOTE: The /admin/promote endpoint can elevate any user to 'admin'. "
+                "Combined with a forged JWT (from the leaked secret), an attacker "
+                "can reach this endpoint with admin claims and promote themselves."
+            ),
+            "nginx_config_hint": (
+                "=== UNLOCKED: nginx reverse-proxy config (nginx.conf excerpt) ===\n"
+                "  location /auth {\n"
+                "      proxy_pass http://auth_service:5000;\n"
+                "      # no ip_allowlist, no limit_req_zone\n"
+                "  }\n"
+                "NOTE: The nginx layer adds no rate-limiting or IP filtering "
+                "in front of /auth, confirming the brute-force surface is "
+                "fully exposed to the internet."
+            ),
+        },
     },
 ]

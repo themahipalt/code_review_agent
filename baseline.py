@@ -1,5 +1,5 @@
 """
-Async LLM baseline for the CodeReviewAgent environment.
+Async LLM baseline for the PRobe environment.
 
 Runs an AsyncOpenAI model against all tasks and produces:
   - Per-step JSONL log  (--output path.jsonl)
@@ -30,12 +30,12 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv()
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "CodeReviewAgent"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "probe"))
 
 from openai import AsyncOpenAI
 
-from CodeReviewAgent.server.CodeReviewAgent_environment import CodereviewagentEnvironment
-from CodeReviewAgent.models import ActionType, CodereviewagentAction
+from probe.server.probe_environment import ProbeEnvironment
+from probe.models import ActionType, ProbeAction
 
 SYSTEM_PROMPT = """\
 You are a senior software engineer performing a pull-request code review.
@@ -47,17 +47,21 @@ Available actions:
    {"action_type": "add_comment", "line_number": <int>, "comment": "<text>",
     "severity": "<info|warning|error|critical>", "category": "<bug|security|performance|style|design>"}
 
-2. REQUEST_CHANGES — signal the PR needs work (after adding all comments):
+2. GET_CONTEXT — reveal ±5 lines around a suspicious line (free near issues, -0.01 elsewhere):
+   {"action_type": "get_context", "line_number": <int>}
+
+3. REQUEST_CHANGES — signal the PR needs work (after adding all comments):
    {"action_type": "request_changes", "comment": "<brief summary>"}
 
-3. APPROVE — approve the PR (only when no significant issues remain):
+4. APPROVE — approve the PR (only when no significant issues remain):
    {"action_type": "approve"}
 
-4. SUBMIT_REVIEW — finalise and submit the review (ends the episode):
+5. SUBMIT_REVIEW — finalise and submit the review (ends the episode):
    {"action_type": "submit_review"}
 
 Strategy:
-- Read the code carefully.
+- Read the code carefully. Use GET_CONTEXT on any suspicious line before commenting.
+- Read every CONTEXT HINT you receive — they reveal deeper system context.
 - Add one ADD_COMMENT for every issue you find (line number + severity + category).
 - Decide REQUEST_CHANGES if issues exist, APPROVE if the code is clean.
 - Always end with SUBMIT_REVIEW.
@@ -68,13 +72,13 @@ Reply with ONLY a valid JSON object — no markdown fences, no explanation.\
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _parse_action(text: str) -> CodereviewagentAction:
+def _parse_action(text: str) -> ProbeAction:
     text = text.strip()
     if text.startswith("```"):
         lines = text.splitlines()
         text = "\n".join(ln for ln in lines if not ln.startswith("```")).strip()
     data = json.loads(text)
-    return CodereviewagentAction(**data)
+    return ProbeAction(**data)
 
 
 def _format_user_message(obs, step: int) -> str:
@@ -85,11 +89,18 @@ def _format_user_message(obs, step: int) -> str:
             f"  [{e.get('type')}] line={e.get('line')} — {str(e.get('text', ''))[:90]}"
             for e in recent
         )
+    hints_section = ""
+    if obs.context_hints:
+        hints_section = "\n\n" + "\n\n".join(
+            f"CONTEXT HINT {i + 1}:\n{hint}"
+            for i, hint in enumerate(obs.context_hints)
+        )
     return (
         f"File: {obs.file_name}  |  Task: {obs.task_difficulty.upper()}\n"
         f"Objective: {obs.task_description}\n"
         f"Progress: step {step}, issues found {obs.issues_found_count}/{obs.total_issues}\n\n"
         f"```python\n{obs.code_snippet}```"
+        f"{hints_section}"
         f"{history_lines}\n\n"
         "What is your next action?"
     )
@@ -106,7 +117,7 @@ async def run_episode(
     episode_idx: int,
     jsonl_file,
 ) -> dict:
-    env = CodereviewagentEnvironment()
+    env = ProbeEnvironment()
 
     # Cycle env resets to land on the target task
     for _ in range(task_id + 1):
@@ -180,7 +191,7 @@ async def run_episode(
         except json.JSONDecodeError as exc:
             print(f"  [WARN] JSON parse error at step {step}: {exc} — forcing submit")
             obs, reward_obj, done, _ = await env.async_step(
-                CodereviewagentAction(action_type=ActionType.SUBMIT_REVIEW)
+                ProbeAction(action_type=ActionType.SUBMIT_REVIEW)
             )
             cumulative_reward += reward_obj.total
             break
@@ -220,9 +231,9 @@ async def async_main(args: argparse.Namespace) -> None:
         sys.exit("ERROR: OPENAI_API_KEY environment variable is not set.")
 
     client = AsyncOpenAI(api_key=api_key)
-    print(f"CodeReviewAgent LLM Baseline  |  model={args.model}  temp={args.temperature}")
+    print(f"PRobe LLM Baseline  |  model={args.model}  temp={args.temperature}")
 
-    from CodeReviewAgent.server.tasks import TASKS
+    from probe.server.tasks import TASKS
     task_ids = [args.task_id] if args.task_id is not None else list(range(len(TASKS)))
 
     jsonl_file = open(args.output, "a") if args.output else None  # noqa: SIM115
@@ -282,7 +293,7 @@ async def async_main(args: argparse.Namespace) -> None:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Async LLM baseline for CodeReviewAgent",
+        description="Async LLM baseline for PRobe",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--model", default=os.environ.get("OPENAI_MODEL", "gpt-4o-mini"))

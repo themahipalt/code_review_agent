@@ -1,0 +1,392 @@
+"""
+Tests for CodeReviewGrader — validates all 5 RL attack scenarios plus
+edge cases for the three anti-exploit fixes made in grader.py.
+
+Attack targets (from the task spec):
+  Lazy / vague output   → 0.00 – 0.15
+  Average output        → 0.30 – 0.50
+  Good output           → 0.60 – 0.80
+  Perfect output        → 0.85 – 1.00
+  Wrong bug reported    → penalty / 0.00
+
+Coverage:
+  1. Lazy attack
+  2. Vague attack
+  3. Wrong-bug / hallucination attack
+  4. Perfect output
+  5. Base-model (average) output
+  6. LINE_TOLERANCE boundary (fix 1)
+  7. Minimum comment length guard (fix 2)
+  8. False-positive penalty value (fix 3)
+  9. final_score — full coverage + correct decision
+  10. final_score — zero coverage + wrong decision
+  11. final_score — partial coverage
+  12. Duplicate SUBMIT_REVIEW penalty (environment layer)
+  13. already_found deduplication
+  14. None / empty comment guard
+"""
+
+import sys
+import os
+
+import pytest
+
+# Ensure the project root (containing the `server` package) is on the path
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from server.grader import CodeReviewGrader, LINE_TOLERANCE
+from server.tasks import TASKS
+
+
+# ── Fixtures ──────────────────────────────────────────────────────────────────
+
+@pytest.fixture
+def task0():
+    """Ultra-easy bootstrap task (2 issues, equal weight 1.0 each)."""
+    return TASKS[0]
+
+
+@pytest.fixture
+def task1():
+    """Easy task (3 issues)."""
+    return TASKS[1]
+
+
+@pytest.fixture
+def grader0(task0):
+    return CodeReviewGrader(task0)
+
+
+@pytest.fixture
+def grader1(task1):
+    return CodeReviewGrader(task1)
+
+
+# ── Sanity ────────────────────────────────────────────────────────────────────
+
+def test_line_tolerance_value():
+    """LINE_TOLERANCE must be 2 after the anti-exploit fix."""
+    assert LINE_TOLERANCE == 2
+
+
+# ── 1. Lazy attack ────────────────────────────────────────────────────────────
+
+def test_lazy_attack_no_credit(grader0):
+    """Generic comment with no matching keyword earns only false-positive penalty."""
+    score, found, _ = grader0.score_comment(
+        line_number=4,
+        # deliberately avoids all task-0 keywords (off-by-one, index, range,
+        # bug, security, password, credential, hardcoded, env, secret, etc.)
+        comment="This function could probably be improved with some refactoring.",
+        already_found=[],
+    )
+    assert found == []
+    assert score <= 0.0  # pure false-positive penalty, no credit
+
+
+def test_lazy_attack_wrong_line(grader0):
+    """Keyword present but line number far from issue — no credit awarded."""
+    score, found, _ = grader0.score_comment(
+        line_number=99,  # far from issue at line 4
+        comment="off-by-one indexerror range",
+        already_found=[],
+    )
+    assert found == []
+    assert score < 0.0  # false-positive penalty applied
+
+
+# ── 2. Vague attack ───────────────────────────────────────────────────────────
+
+def test_vague_attack_category_only(grader0):
+    """Mentioning category ('bug') on correct line but no specific keyword — no credit."""
+    score, found, _ = grader0.score_comment(
+        line_number=4,
+        comment="This code has a logical issue.",
+        already_found=[],
+    )
+    assert found == []
+    assert score <= 0.0
+
+
+# ── 3. Wrong-bug / hallucination attack ──────────────────────────────────────
+
+def test_wrong_bug_on_correct_line_wrong_keyword(grader0):
+    """Hallucinated keyword on the correct line must not earn credit."""
+    score, found, _ = grader0.score_comment(
+        line_number=4,
+        comment="This has a performance bottleneck and memory leak issue here.",
+        already_found=[],
+    )
+    # 'performance' / 'memory' are not in bootstrap_off_by_one keywords
+    assert found == []
+    assert score <= 0.0
+
+
+def test_wrong_bug_wrong_line_right_keyword(grader0):
+    """Right keyword, wrong line — line_hit must block the credit."""
+    score, found, _ = grader0.score_comment(
+        line_number=50,  # nowhere near line 4 or 11
+        comment="off-by-one indexerror range len + 1",
+        already_found=[],
+    )
+    assert found == []
+    assert score <= 0.0
+
+
+# ── 4. Perfect output ─────────────────────────────────────────────────────────
+
+def test_perfect_comment_task0_issue1(grader0):
+    """Exact keyword + exact line → full credit for issue 1."""
+    score, found, breakdown = grader0.score_comment(
+        line_number=4,
+        comment="Off-by-one error: range(len(data) + 1) causes IndexError on the last iteration.",
+        already_found=[],
+    )
+    assert "bootstrap_off_by_one" in found
+    assert breakdown["issue_credit"] == pytest.approx(0.30, abs=0.01)
+    assert score > 0.0
+
+
+def test_perfect_comment_task0_issue2(grader0):
+    """Exact keyword + exact line → full credit for issue 2."""
+    score, found, _ = grader0.score_comment(
+        line_number=11,
+        comment="Hardcoded password / credential in source — move to environment variable.",
+        already_found=[],
+    )
+    assert "bootstrap_hardcoded_cred" in found
+    assert score > 0.0
+
+
+def test_perfect_final_score_task0(grader0):
+    """Full coverage + correct decision gives max terminal reward.
+
+    final_score() is the TERMINAL component only (coverage 0.20 + decision 0.10
+    + efficiency 0.10 = max 0.40).  The per-comment 0.60 accumulates separately
+    during the episode via score_comment().  Assert the realistic terminal range.
+    """
+    reward = grader0.final_score(
+        issues_found=["bootstrap_off_by_one", "bootstrap_hardcoded_cred"],
+        review_decision="request_changes",
+        steps_used=4,
+        max_steps=6,
+    )
+    # coverage_bonus=0.20 + decision_score=0.10 + efficiency_bonus>0 → ~0.33-0.40
+    assert reward.total >= 0.30
+    assert reward.components["coverage_bonus"] == pytest.approx(0.20, abs=0.01)
+    assert reward.components["decision_score"] == pytest.approx(0.10, abs=0.001)
+    assert reward.passed is True
+
+
+# ── 5. Base-model (average) output ───────────────────────────────────────────
+
+def test_base_model_finds_one_of_two(grader0):
+    """Agent that finds 1/2 issues correctly should score in the average range."""
+    # Step 1: correct comment finding issue 1
+    score1, found1, _ = grader0.score_comment(
+        line_number=4,
+        comment="range(len(data) + 1) has an off-by-one bug causing IndexError.",
+        already_found=[],
+    )
+    # Step 2: vague comment on issue 2 line — no keyword match
+    score2, found2, _ = grader0.score_comment(
+        line_number=11,
+        comment="This line looks like it might have an issue with the connection string.",
+        already_found=found1,
+    )
+    reward = grader0.final_score(
+        issues_found=found1 + found2,
+        review_decision="request_changes",
+        steps_used=4,
+        max_steps=6,
+    )
+    # 50 % coverage → coverage_bonus=0.10, correct_decision=+0.10 → 0.20 total
+    # Well below the 0.85 perfect ceiling, above 0.10 lazy floor
+    assert 0.15 <= reward.total <= 0.55
+
+
+# ── 6. LINE_TOLERANCE boundary ────────────────────────────────────────────────
+
+def test_line_just_inside_tolerance(grader0):
+    """line_number at start - LINE_TOLERANCE must still match."""
+    issue_start = TASKS[0]["issues"][0]["line_range"][0]  # 4
+    score, found, _ = grader0.score_comment(
+        line_number=issue_start - LINE_TOLERANCE,  # exactly at boundary
+        comment="off-by-one indexerror range(len + 1) causes crash here",
+        already_found=[],
+    )
+    assert "bootstrap_off_by_one" in found
+
+
+def test_line_just_outside_tolerance(grader0):
+    """line_number at start - LINE_TOLERANCE - 1 must NOT match."""
+    issue_start = TASKS[0]["issues"][0]["line_range"][0]  # 4
+    score, found, _ = grader0.score_comment(
+        line_number=issue_start - LINE_TOLERANCE - 1,  # one beyond boundary
+        comment="off-by-one indexerror range(len + 1) causes crash here",
+        already_found=[],
+    )
+    assert found == []
+    assert score <= 0.0
+
+
+# ── 7. Minimum comment length guard ──────────────────────────────────────────
+
+def test_short_keyword_comment_no_credit(grader0):
+    """A comment ≤ 15 chars containing a matching keyword must NOT earn credit."""
+    score, found, _ = grader0.score_comment(
+        line_number=4,
+        comment="indexerror",  # 10 chars — below 15-char threshold
+        already_found=[],
+    )
+    assert found == []
+    # short comment → neither credit nor false-positive penalty
+    assert score == 0.0
+
+
+def test_short_comment_no_false_positive_penalty(grader0):
+    """A short comment that matches nothing must NOT be penalised (too trivial)."""
+    score, found, _ = grader0.score_comment(
+        line_number=99,
+        comment="hmm",  # 3 chars
+        already_found=[],
+    )
+    assert found == []
+    assert score == 0.0
+
+
+def test_borderline_length_comment(grader0):
+    """A 16-char comment (just above threshold) with keyword + correct line earns credit."""
+    score, found, _ = grader0.score_comment(
+        line_number=4,
+        comment="off-by-one range!",  # 17 chars, > 15
+        already_found=[],
+    )
+    assert "bootstrap_off_by_one" in found
+    assert score > 0.0
+
+
+# ── 8. False-positive penalty value ──────────────────────────────────────────
+
+def test_false_positive_penalty_magnitude(grader0):
+    """Each wrong substantive comment must cost exactly -0.05."""
+    score, found, breakdown = grader0.score_comment(
+        line_number=99,
+        comment="This line has a performance issue with the loop structure.",
+        already_found=[],
+    )
+    assert found == []
+    assert breakdown["false_positive_penalty"] == pytest.approx(-0.05, abs=0.001)
+
+
+def test_multiple_false_positives_accumulate(grader0):
+    """Two wrong comments should each attract -0.05 independently."""
+    s1, _, bd1 = grader0.score_comment(
+        line_number=99,
+        comment="This line has a performance issue with the loop structure.",
+        already_found=[],
+    )
+    s2, _, bd2 = grader0.score_comment(
+        line_number=88,
+        comment="There is a design problem with this database call here.",
+        already_found=[],
+    )
+    assert bd1["false_positive_penalty"] == pytest.approx(-0.05, abs=0.001)
+    assert bd2["false_positive_penalty"] == pytest.approx(-0.05, abs=0.001)
+    # Combined penalty is -0.10 — within the -0.1 to -0.2 spec for 2 wrong claims
+    assert s1 + s2 == pytest.approx(-0.10, abs=0.001)
+
+
+# ── 9. final_score — full coverage + correct decision ─────────────────────────
+
+def test_final_score_full_coverage_correct_decision(grader1):
+    """100% coverage + correct decision → max terminal reward ~0.37-0.40."""
+    all_ids = [iss["id"] for iss in TASKS[1]["issues"]]
+    reward = grader1.final_score(
+        issues_found=all_ids,
+        review_decision="request_changes",
+        steps_used=5,
+        max_steps=15,
+    )
+    assert reward.total >= 0.30
+    assert reward.passed is True
+    assert reward.terminal is True
+    assert reward.components["coverage_bonus"] == pytest.approx(0.20, abs=0.01)
+    assert reward.components["decision_score"] == pytest.approx(0.10, abs=0.001)
+
+
+# ── 10. final_score — zero coverage + wrong decision ─────────────────────────
+
+def test_final_score_zero_coverage_wrong_decision(grader1):
+    reward = grader1.final_score(
+        issues_found=[],
+        review_decision="approve",  # wrong — should be request_changes
+        steps_used=15,
+        max_steps=15,
+    )
+    assert reward.total <= 0.0
+    assert reward.passed is False
+    assert reward.components["decision_score"] == pytest.approx(-0.10, abs=0.001)
+    assert reward.components["coverage_bonus"] == pytest.approx(0.0, abs=0.001)
+
+
+# ── 11. final_score — partial coverage ───────────────────────────────────────
+
+def test_final_score_partial_coverage(grader1):
+    """Finding 1 out of 3 issues (weight 1.0 / 2.5 total) with correct decision."""
+    reward = grader1.final_score(
+        issues_found=["off_by_one"],  # weight 1.0 out of 2.5 total
+        review_decision="request_changes",
+        steps_used=10,
+        max_steps=15,
+    )
+    # coverage = 1.0/2.5 = 0.40 → coverage_bonus = 0.08
+    # decision_score = +0.10
+    # efficiency_bonus = 0.0 (coverage < 0.60)
+    # total = 0.18
+    assert 0.10 <= reward.total <= 0.30
+    assert reward.passed is False  # coverage < 60 %
+
+
+# ── 12. Already-found deduplication ──────────────────────────────────────────
+
+def test_already_found_not_double_credited(grader0):
+    """An issue already in already_found must not be credited again."""
+    score, found, _ = grader0.score_comment(
+        line_number=4,
+        comment="off-by-one indexerror range(len + 1) causes crash on last item",
+        already_found=["bootstrap_off_by_one"],  # pre-marked as found
+    )
+    assert "bootstrap_off_by_one" not in found
+    assert score <= 0.0  # false-positive penalty since nothing was matched
+
+
+# ── 13. None / empty comment guard ───────────────────────────────────────────
+
+def test_none_comment_returns_zero(grader0):
+    score, found, breakdown = grader0.score_comment(
+        line_number=4,
+        comment=None,
+        already_found=[],
+    )
+    assert score == 0.0
+    assert found == []
+    assert breakdown == {}
+
+
+def test_empty_comment_returns_zero(grader0):
+    score, found, _ = grader0.score_comment(
+        line_number=4,
+        comment="",
+        already_found=[],
+    )
+    assert score == 0.0
+    assert found == []
+
+
+# ── 14. Task weight totals are non-zero (guards __init__) ────────────────────
+
+def test_all_task_total_weights_positive():
+    for task in TASKS:
+        grader = CodeReviewGrader(task)
+        assert grader.total_weight > 0.0, f"Task {task['id']} has zero total weight"
