@@ -1,32 +1,40 @@
 spec_version: 1
-name: CodeReviewAgent
+name: PRobe
 type: space
 runtime: fastapi
 app: server.app:app
 port: 8000
 
 description: >
-  Code review environment where an agent reviews Python source files,
-  identifies bugs, security vulnerabilities, performance bottlenecks,
-  and design issues, then submits a structured review with comments
-  and a final decision (request_changes or approve).
+  PRobe (Pull Request Investigation Environment) — an RL training environment
+  where an agent reviews Python source files, identifies bugs, security
+  vulnerabilities, performance bottlenecks, and design issues, then submits a
+  structured review. Features dynamic code mutation, a GET_CONTEXT probe action,
+  and a causal unlock chain for genuine world-model reasoning.
 
 tasks:
   - id: 0
+    name: Bootstrap Obvious Issues
+    difficulty: ultra-easy
+    description: Off-by-one and hardcoded credential, both hinted in comments
+    max_steps: 6
+    issues: 2
+
+  - id: 1
     name: Basic Bug Detection
     difficulty: easy
     description: Identify logical bugs in a simple Python utility module
     max_steps: 15
     issues: 3
 
-  - id: 1
+  - id: 2
     name: Security Vulnerability Review
     difficulty: medium
     description: Find security vulnerabilities in an authentication module
     max_steps: 20
     issues: 5
 
-  - id: 2
+  - id: 3
     name: Full Architecture and Performance Review
     difficulty: hard
     description: >
@@ -35,14 +43,14 @@ tasks:
     max_steps: 30
     issues: 7
 
-  - id: 3
+  - id: 4
     name: Async Worker Review
     difficulty: medium
     description: Find concurrency bugs and resource leaks in an async worker
     max_steps: 20
     issues: 5
 
-  - id: 4
+  - id: 5
     name: Flask API Security Review
     difficulty: hard
     description: >
@@ -51,19 +59,30 @@ tasks:
     max_steps: 30
     issues: 6
 
+  - id: 6
+    name: Causal Secrets Leak Investigation
+    difficulty: hard
+    description: >
+      JWT auth service review with causal unlock chain — finding key issues
+      reveals DB schema and nginx config, enabling deeper attack-path reasoning
+    max_steps: 35
+    issues: 6
+    causal_unlocks: true
+
 observation:
   type: object
   fields:
-    code_snippet: {type: string, description: "Python source to review"}
+    code_snippet: {type: string, description: "Python source to review (mutated each episode)"}
     task_description: {type: string, description: "Review instructions"}
     file_name: {type: string}
-    task_id: {type: integer, range: [0, 4]}
-    task_difficulty: {type: string, values: [easy, medium, hard]}
+    task_id: {type: integer, range: [0, 6]}
+    task_difficulty: {type: string, values: [ultra-easy, easy, medium, hard]}
     review_history: {type: array, description: "Actions taken so far"}
     step_count: {type: integer}
     max_steps: {type: integer}
     issues_found_count: {type: integer}
     total_issues: {type: integer}
+    context_hints: {type: array, description: "Causal hints unlocked by finding key issues"}
     done: {type: boolean}
     reward: {type: number}
 
@@ -72,7 +91,7 @@ action:
   fields:
     action_type:
       type: enum
-      values: [add_comment, request_changes, approve, submit_review]
+      values: [add_comment, get_context, request_changes, approve, submit_review]
     line_number: {type: integer, required: false}
     comment: {type: string, required: false}
     severity:
@@ -88,9 +107,11 @@ reward_design:
   range: [-1.0, 1.0]
   per_step:
     issue_found: "up to 0.60 total (weight/total_weight × 0.60 per issue)"
-    false_positive: -0.02
+    false_positive: -0.05
     correct_request_changes: +0.05
     bad_approval: -0.15
+    context_probe_near_issue: 0.00
+    context_probe_far: -0.01
   terminal:
     coverage_bonus: "coverage × 0.20  (max +0.20)"
     decision_correct: +0.10

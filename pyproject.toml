@@ -9,9 +9,9 @@ requires = ["setuptools>=45", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "openenv-CodeReviewAgent"
+name = "openenv-PRobe"
 version = "0.1.0"
-description = "Codereviewagent environment for OpenEnv"
+description = "PRobe — Pull Request Investigation Environment for OpenEnv"
 requires-python = ">=3.10"
 dependencies = [
     # Core OpenEnv runtime (provides FastAPI server + HTTP client types)
@@ -31,10 +31,15 @@ dev = [
 
 [project.scripts]
 # Server entry point - enables running via: uv run --project . server
-# or: python -m CodeReviewAgent.server.app
-server = "CodeReviewAgent.server.app:main"
+server = "PRobe.server.app:main"
 
 [tool.setuptools]
 include-package-data = true
-packages = ["CodeReviewAgent", "CodeReviewAgent.server"]
-package-dir = { "CodeReviewAgent" = ".", "CodeReviewAgent.server" = "server" }
+packages = ["PRobe", "PRobe.server"]
+package-dir = { "PRobe" = ".", "PRobe.server" = "server" }
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "pytest-cov>=7.1.0",
+]

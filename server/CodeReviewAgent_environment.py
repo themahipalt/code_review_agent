@@ -6,7 +6,18 @@ Episode lifecycle:
   2. step(a)  → (Obs, RewardType, done, info) (execute one action)
   3. state()  → dict                          (full internal snapshot)
 
-Tasks cycle automatically: 0 (ultra-easy) → 1 (easy) → … → 5 (hard flask) → 0 …
+Tasks cycle automatically: 0 (ultra-easy) → 1 (easy) → … → 6 (causal chain) → 0 …
+
+Dynamic world features (v3)
+───────────────────────────
+• Code mutation   — each episode applies surface-level variable renames,
+                    a line shift, and a constant nudge so the agent must
+                    read the code rather than memorise tokens.
+• GET_CONTEXT     — the agent can spend a step probing a specific line to
+                    receive the surrounding ±5 lines of context.
+• Causal unlocks  — finding certain issues appends a new context hint to
+                    the observation, modelling real-world situations where
+                    one discovery leads to deeper investigation.
 
 Thread / task safety: each Environment instance owns its own state.
 For concurrent GRPO rollouts spin up one instance per worker.
@@ -15,6 +26,8 @@ For concurrent GRPO rollouts spin up one instance per worker.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import logging
 from typing import Any
 from uuid import uuid4
 
@@ -24,30 +37,30 @@ from openenv.core.env_server.types import State
 try:
     from ..models import (
         ActionType,
-        CodereviewagentAction,
-        CodereviewagentObservation,
+        ProbeAction,
+        ProbeObservation,
         RewardType,
     )
-    from .grader import CodeReviewGrader
+    from .grader import CodeReviewGrader, LINE_TOLERANCE
+    from .mutator import mutate_task
     from .tasks import TASKS
 except ImportError:
     from models import (  # type: ignore[no-redef]
         ActionType,
-        CodereviewagentAction,
-        CodereviewagentObservation,
+        ProbeAction,
+        ProbeObservation,
         RewardType,
     )
-    from server.grader import CodeReviewGrader  # type: ignore[no-redef]
-    from server.tasks import TASKS  # type: ignore[no-redef]
+    from server.grader import CodeReviewGrader, LINE_TOLERANCE  # type: ignore[no-redef]
+    from server.mutator import mutate_task       # type: ignore[no-redef]
+    from server.tasks import TASKS              # type: ignore[no-redef]
 
-# Sentinel reward returned on non-terminal steps that produce no signal
-_ZERO_REWARD = RewardType(total=0.0, components={}, passed=False,
-                           explanation="No signal this step.", step=0, terminal=False)
+log = logging.getLogger(__name__)
 
 
-class CodereviewagentEnvironment(Environment):
+class ProbeEnvironment(Environment):
     """
-    OpenEnv-compliant code-review environment.
+    PRobe — Pull Request Investigation Environment.
 
     Public interface is fully async.  The sync wrappers (reset / step / state)
     required by openenv's create_app are also provided; they delegate to the
@@ -76,23 +89,28 @@ class CodereviewagentEnvironment(Environment):
             "review_decision": None,
             "review_submitted": False,
             "cumulative_reward": 0.0,
+            # causal world-modeling state
+            "context_hints": [],          # list[str] of unlocked hint texts
+            "hints_unlocked": set(),      # set[str] of hint keys already fired
         }
 
     # ── Async-native interface (primary) ──────────────────────────────────
 
-    async def async_reset(self) -> CodereviewagentObservation:
+    async def async_reset(self) -> ProbeObservation:
         task_id = self._reset_count % len(TASKS)
+        seed = self._reset_count          # unique seed per episode
         self._reset_count += 1
         self._episode_id = str(uuid4())
         self._step_count = 0
-        task = TASKS[task_id]
+        # Apply surface mutation so the agent cannot memorise tokens
+        task = mutate_task(TASKS[task_id], seed=seed)
         self._grader = CodeReviewGrader(task)
         self._ep = self._fresh_episode(task)
         return self._make_obs(reward=0.0, done=False)
 
     async def async_step(
-        self, action: CodereviewagentAction
-    ) -> tuple[CodereviewagentObservation, RewardType, bool, dict[str, Any]]:
+        self, action: ProbeAction
+    ) -> tuple[ProbeObservation, RewardType, bool, dict[str, Any]]:
         self._step_count += 1
         task = self._ep["task"]
         done = False
@@ -100,6 +118,9 @@ class CodereviewagentEnvironment(Environment):
 
         if action.action_type == ActionType.ADD_COMMENT:
             reward_obj = self._handle_add_comment(action)
+
+        elif action.action_type == ActionType.GET_CONTEXT:
+            reward_obj = self._handle_get_context(action)
 
         elif action.action_type == ActionType.REQUEST_CHANGES:
             reward_obj = self._handle_request_changes(action)
@@ -165,32 +186,29 @@ class CodereviewagentEnvironment(Environment):
 
     # ── Sync wrappers (openenv / create_app compatibility) ────────────────
 
-    def reset(self) -> CodereviewagentObservation:  # type: ignore[override]
+    def reset(self) -> ProbeObservation:  # type: ignore[override]
         try:
-            loop = asyncio.get_running_loop()
+            asyncio.get_running_loop()
         except RuntimeError:
             return asyncio.run(self.async_reset())
-        # Called from inside a running loop (e.g. pytest-asyncio) — run directly
-        import concurrent.futures
+        # Called from inside a running loop (e.g. pytest-asyncio) -- run in a
+        # fresh thread that has its own event loop.
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            fut = pool.submit(asyncio.run, self.async_reset())
-            return fut.result()
+            return pool.submit(asyncio.run, self.async_reset()).result()
 
-    def step(self, action: CodereviewagentAction) -> CodereviewagentObservation:  # type: ignore[override]
+    def step(self, action: ProbeAction) -> ProbeObservation:  # type: ignore[override]
         """
         Sync step for openenv compatibility.
         Returns only the Observation (reward is embedded in obs.reward).
         Use async_step() for the full (obs, reward, done, info) tuple.
         """
         try:
-            loop = asyncio.get_running_loop()
+            asyncio.get_running_loop()
         except RuntimeError:
             obs, _, _, _ = asyncio.run(self.async_step(action))
             return obs
-        import concurrent.futures
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            fut = pool.submit(asyncio.run, self.async_step(action))
-            obs, _, _, _ = fut.result()
+            obs, _, _, _ = pool.submit(asyncio.run, self.async_step(action)).result()
             return obs
 
     @property
@@ -199,7 +217,7 @@ class CodereviewagentEnvironment(Environment):
 
     # ── Action handlers ───────────────────────────────────────────────────
 
-    def _handle_add_comment(self, action: CodereviewagentAction) -> RewardType:
+    def _handle_add_comment(self, action: ProbeAction) -> RewardType:
         entry = {
             "type": "comment",
             "line": action.line_number,
@@ -224,6 +242,9 @@ class CodereviewagentEnvironment(Environment):
         else:
             explanation = "Comment recorded; no new issue matched."
 
+        # ── Causal unlock: check whether any newly found issue reveals context
+        self._unlock_causal_hints(new_finds)
+
         return RewardType(
             total=clamped,
             components=breakdown,
@@ -233,7 +254,79 @@ class CodereviewagentEnvironment(Environment):
             terminal=False,
         )
 
-    def _handle_request_changes(self, action: CodereviewagentAction) -> RewardType:
+    def _unlock_causal_hints(self, newly_found: list[str]) -> None:
+        """Append context hint text for any issue that has an 'unlocks' key."""
+        task = self._ep["task"]
+        hint_map: dict[str, str] = task.get("context_hints", {})
+        for issue in task["issues"]:
+            unlock_key = issue.get("unlocks")
+            if (
+                unlock_key
+                and issue["id"] in newly_found
+                and unlock_key not in self._ep["hints_unlocked"]
+                and unlock_key in hint_map
+            ):
+                self._ep["hints_unlocked"].add(unlock_key)
+                self._ep["context_hints"].append(hint_map[unlock_key])
+
+    def _handle_get_context(
+        self, action: ProbeAction
+    ) -> RewardType:
+        """
+        GET_CONTEXT — reveal ±5 lines around the requested line number.
+
+        Costs a small step penalty (-0.01) to discourage random probing,
+        but rewards focused investigation (line near an actual issue: 0.0
+        net cost — penalty waived).
+        """
+        line_number = action.line_number
+        task = self._ep["task"]
+        code_lines = task["code"].split("\n")
+
+        if line_number is None:
+            return RewardType(
+                total=-0.02,
+                components={"invalid_context_probe": -0.02},
+                passed=False,
+                explanation="GET_CONTEXT requires a line_number.",
+                step=self._step_count,
+                terminal=False,
+            )
+
+        # Build snippet
+        start = max(0, line_number - 6)
+        end = min(len(code_lines), line_number + 5)
+        snippet_lines = [
+            f"{i + 1:3}: {code_lines[i]}" for i in range(start, end)
+        ]
+        snippet = "\n".join(snippet_lines)
+
+        # Check if probed line is near a real issue (within LINE_TOLERANCE).
+        near_issue = any(
+            (iss["line_range"][0] - LINE_TOLERANCE) <= line_number <= (iss["line_range"][1] + LINE_TOLERANCE)
+            for iss in task["issues"]
+        )
+        penalty = 0.0 if near_issue else -0.01
+
+        # Store the context result in review history so the agent can see it
+        self._ep["review_comments"].append({
+            "type": "context_probe",
+            "line": line_number,
+            "context": snippet,
+        })
+
+        return RewardType(
+            total=penalty,
+            components={"context_probe_penalty": penalty},
+            passed=near_issue,
+            explanation=(
+                f"Context around line {line_number}:\n{snippet}"
+            ),
+            step=self._step_count,
+            terminal=False,
+        )
+
+    def _handle_request_changes(self, action: ProbeAction) -> RewardType:
         self._ep["review_decision"] = "request_changes"
         self._ep["review_comments"].append(
             {"type": "request_changes", "text": action.comment}
@@ -304,9 +397,9 @@ class CodereviewagentEnvironment(Environment):
 
     # ── Observation builder ───────────────────────────────────────────────
 
-    def _make_obs(self, reward: float, done: bool) -> CodereviewagentObservation:
+    def _make_obs(self, reward: float, done: bool) -> ProbeObservation:
         task = self._ep["task"]
-        return CodereviewagentObservation(
+        return ProbeObservation(
             code_snippet=task["code"],
             task_description=task["description"],
             file_name=task["file_name"],
@@ -319,9 +412,11 @@ class CodereviewagentEnvironment(Environment):
             total_issues=len(task["issues"]),
             done=done,
             reward=round(max(-1.0, min(1.0, reward)), 4),
+            context_hints=list(self._ep.get("context_hints", [])),
             metadata={
                 "cumulative_reward": self._ep.get("cumulative_reward", 0.0),
                 "review_decision": self._ep.get("review_decision"),
                 "episode_id": self._episode_id,
+                "mutation_seed": self._ep["task"].get("_mutation_seed"),
             },
         )

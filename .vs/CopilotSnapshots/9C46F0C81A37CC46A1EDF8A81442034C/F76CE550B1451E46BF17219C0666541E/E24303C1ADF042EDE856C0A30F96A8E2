@@ -1,0 +1,212 @@
+﻿"""
+Data models for the CodeReviewAgent Environment.
+
+An agent reviews Python source files, identifies bugs, security issues,
+and design problems, then submits a structured review.
+"""
+
+from enum import Enum
+from typing import Any
+import re
+
+from openenv.core.env_server.types import Action, Observation
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class ActionType(str, Enum):
+    ADD_COMMENT = "add_comment"
+    REQUEST_CHANGES = "request_changes"
+    APPROVE = "approve"
+    SUBMIT_REVIEW = "submit_review"
+    GET_CONTEXT = "get_context"   # probe a line for deeper causal context
+
+
+class Severity(str, Enum):
+    INFO = "info"
+    WARNING = "warning"
+    ERROR = "error"
+    CRITICAL = "critical"
+
+
+class IssueCategory(str, Enum):
+    BUG = "bug"
+    SECURITY = "security"
+    PERFORMANCE = "performance"
+    STYLE = "style"
+    DESIGN = "design"
+
+
+class RewardType(BaseModel):
+    """
+    Structured reward returned by step().
+
+    total       : final clamped score in [-1.0, 1.0]
+    components  : named sub-scores before clamping (may sum outside [-1, 1])
+    passed      : True when the action was a clear positive signal
+    explanation : human-readable breakdown for logging / debugging
+    step        : environment step this reward was issued at
+    terminal    : True only on the SUBMIT_REVIEW step
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    total: float = Field(..., ge=-1.0, le=1.0)
+    components: dict[str, float] = Field(default_factory=dict)
+    passed: bool = Field(False)
+    explanation: str = Field("")
+    step: int = Field(0)
+    terminal: bool = Field(False)
+
+
+class CodereviewagentAction(Action):
+    """
+    - ADD_COMMENT    : annotate a specific line with a review comment
+    - REQUEST_CHANGES: mark the PR as needing changes
+    - APPROVE        : approve the PR (only when no significant issues remain)
+    - SUBMIT_REVIEW  : finalize and submit the review (ends the episode)
+    """
+
+    action_type: ActionType = Field(..., description="Type of review action")
+    line_number: int | None = Field(None, description="Source line being commented on")
+    comment: str | None = Field(None, description="Review comment text")
+    severity: Severity | None = Field(None, description="Issue severity level")
+    category: IssueCategory | None = Field(None, description="Issue category")
+
+
+class CodereviewagentObservation(Observation):
+    """
+    Contains the code to review, task instructions, and the running
+    review history so the agent can track what it has already flagged.
+    The `reward` field mirrors the most recent step reward for convenience;
+    the authoritative reward is the RewardType returned by step().
+    """
+
+    code_snippet: str = Field(default="", description="Python source code to review")
+    task_description: str = Field(default="", description="Review instructions and goals")
+    file_name: str = Field(default="", description="Name of the file being reviewed")
+    task_id: int = Field(default=0, description="Current task index")
+    task_difficulty: str = Field(default="ultra-easy", description="Task difficulty label")
+    review_history: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Ordered list of actions taken so far this episode",
+    )
+    step_count: int = Field(default=0, description="Steps taken in current episode")
+    max_steps: int = Field(default=6, description="Step budget for this task")
+    issues_found_count: int = Field(default=0, description="Number of issues identified so far")
+    total_issues: int = Field(default=0, description="Total issues in this task")
+    done: bool = Field(default=False, description="Whether the episode has ended")
+    reward: float = Field(default=0.0, description="Most recent step reward (mirror of RewardType.total)")
+    metadata: dict[str, Any] = Field(default_factory=dict, description="Extra episode metadata")
+    context_hints: list[str] = Field(
+        default_factory=list,
+        description="Causal context unlocked by finding key issues — read these carefully",
+    )
+
+
+def grade(output: str, input_code: str, is_correct_code: bool = None) -> float:
+    """
+    Rubric-based grader for RL World Modeling / Bug Detection task.
+    Penalizes hallucination, rewards precise identification + valid fix.
+    
+    Args:
+        output:           The agent's response text
+        input_code:       The original code snippet given to the agent
+        is_correct_code:  Ground truth — True if input has NO bugs
+    """
+    score = 0.0
+    penalties = 0.0
+    output_lower = output.lower()
+
+    # ── 1. HALLUCINATION PENALTY ──────────────────────────────────────────────
+    # If the input is known-correct but agent claims a bug → hard penalty
+    claims_bug = any(kw in output_lower for kw in [
+        "bug", "error", "issue", "incorrect", "wrong", "off-by-one",
+        "fault", "flaw", "mistake", "problem"
+    ])
+    claims_correct = any(phrase in output_lower for phrase in [
+        "no bug", "correct", "looks correct", "no issue", "no error",
+        "this code is fine", "there is no"
+    ])
+
+    if is_correct_code is True:
+        if claims_bug and not claims_correct:
+            penalties += 0.4   # strong hallucination penalty
+        elif claims_correct:
+            score += 0.5       # correctly identified no bug
+
+    # ── 2. BUG IDENTIFICATION QUALITY ────────────────────────────────────────
+    if is_correct_code is False:
+        if not claims_bug:
+            # Failed to detect a real bug → heavy penalty
+            penalties += 0.5
+        else:
+            # Basic detection present
+            score += 0.15
+
+            # Specificity: references actual code tokens from input
+            input_tokens = set(re.findall(r'\b\w{3,}\b', input_code))
+            output_tokens = set(re.findall(r'\b\w{3,}\b', output))
+            overlap = len(input_tokens & output_tokens)
+            specificity_bonus = min(overlap / max(len(input_tokens), 1), 1.0) * 0.2
+            score += specificity_bonus
+
+            # Explanation quality: causal language
+            causal_phrases = ["because", "this causes", "results in",
+                              "instead of", "should be", "the issue is",
+                              "this means", "which leads to"]
+            causal_count = sum(1 for p in causal_phrases if p in output_lower)
+            score += min(causal_count * 0.07, 0.2)
+
+    # ── 3. FIX QUALITY ───────────────────────────────────────────────────────
+    has_code_block = bool(re.search(r'```[\s\S]*?```', output))
+    has_inline_code = bool(re.search(r'def |return |for |while |if ', output))
+
+    if is_correct_code is False:
+        if has_code_block:
+            score += 0.2
+        elif has_inline_code:
+            score += 0.1  # partial credit
+
+        # Fix must differ meaningfully from input (not just restatement)
+        if has_code_block:
+            fix_block = re.findall(r'```[\s\S]*?```', output)
+            fix_text = " ".join(fix_block)
+            if fix_text.strip() == input_code.strip():
+                penalties += 0.2  # fix is identical to buggy input — no real fix
+            elif len(fix_text) > 30:
+                score += 0.1  # fix has substance
+
+    # ── 4. RESPONSE COMPLETENESS ─────────────────────────────────────────────
+    # Penalize extremely short responses (< 80 chars) — too lazy
+    if len(output.strip()) < 80:
+        penalties += 0.2
+
+    # Reward structured responses: explanation + fix both present
+    has_explanation = causal_count > 0 if is_correct_code is False else claims_correct
+    if is_correct_code is False and has_explanation and has_code_block:
+        score += 0.15   # completeness bonus
+
+    # ── 5. GENERIC / TEMPLATED RESPONSE DETECTION ────────────────────────────
+    generic_phrases = [
+        "there is a bug in the code",
+        "this code has an issue",
+        "please fix it",
+        "the code is incorrect",
+        "there might be a problem",
+    ]
+    generic_hits = sum(1 for p in generic_phrases if p in output_lower)
+    if generic_hits >= 1:
+        penalties += 0.15 * generic_hits  # penalize copy-paste non-answers
+
+    # ── 6. FINAL SCORE ───────────────────────────────────────────────────────
+    final = score - penalties
+    return round(max(0.0, min(1.0, final)), 3)
+
+
+# ── CALIBRATION TARGETS ──────────────────────────────────────────────────────
+# Lazy output on buggy code:    ~0.0  – 0.10
+# Vague output on buggy code:   ~0.10 – 0.18
+# Wrong bug on correct code:    ~0.0  (penalty applied)
+# Correct "no bug" on correct:  ~0.50
+# Average LLM output:           ~0.35 – 0.50
+# Perfect output:               ~0.85 – 1.00

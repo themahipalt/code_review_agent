@@ -1,0 +1,2 @@
+[console_scripts]
+server = PRobe.server.app:main

@@ -882,6 +882,7 @@ dependencies = [
     { name = "gradio-client" },
     { name = "typer" },
 ]
+sdist = { url = "https://files.pythonhosted.org/packages/ce/86/c9694b7cfada5780e75769e60dc161a161f4dd7fc91b61db5e3a3338bef9/hf_gradio-0.4.1.tar.gz", hash = "sha256:a017d942618f0d495a58ee4563047fa04bef614c00e0cb789a9a6d0633cffa7b", size = 6560, upload-time = "2026-04-22T14:01:32.334Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/30/2d/afff2ee87e75d8eb85c92bb8cf0e15b05c23c2ebd8fd8dec781d8601ed7f/hf_gradio-0.4.1-py3-none-any.whl", hash = "sha256:76b8cb8be6abe62d74c1ad2d35b42f0629db89aa9e1a8d033cecfe7c856eeab3", size = 4482, upload-time = "2026-04-17T19:53:31.827Z" },
 ]
@@ -1572,32 +1573,6 @@ wheels = [
 ]
 
 [[package]]
-name = "openenv-codereviewagent"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "openai" },
-    { name = "openenv-core", extra = ["core"] },
-    { name = "python-dotenv" },
-]
-
-[package.optional-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "pytest-cov" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "openai", specifier = ">=1.0.0" },
-    { name = "openenv-core", extras = ["core"], specifier = ">=0.2.2" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
-    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.0.0" },
-    { name = "python-dotenv", specifier = ">=1.2.2" },
-]
-provides-extras = ["dev"]
-
-[[package]]
 name = "openenv-core"
 version = "0.2.3"
 source = { registry = "https://pypi.org/simple" }
@@ -1630,6 +1605,44 @@ core = [
     { name = "requests" },
     { name = "uvicorn" },
     { name = "websockets" },
+]
+
+[[package]]
+name = "openenv-probe"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "openai" },
+    { name = "openenv-core", extra = ["core"] },
+    { name = "python-dotenv" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "pytest-cov" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "pytest-cov" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "openai", specifier = ">=1.0.0" },
+    { name = "openenv-core", extras = ["core"], specifier = ">=0.2.2" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
+    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.0.0" },
+    { name = "python-dotenv", specifier = ">=1.2.2" },
+]
+provides-extras = ["dev"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=9.0.3" },
+    { name = "pytest-cov", specifier = ">=7.1.0" },
 ]
 
 [[package]]

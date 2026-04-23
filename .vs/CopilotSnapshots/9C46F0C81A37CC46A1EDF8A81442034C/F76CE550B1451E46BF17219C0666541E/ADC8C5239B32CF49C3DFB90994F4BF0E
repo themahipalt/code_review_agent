@@ -1,0 +1,344 @@
+﻿"""
+Tests for the dynamic world features:
+  - server/mutator.py   (code mutation engine)
+  - Task 6              (causal chain / progressive observation)
+  - GET_CONTEXT action  (line-context probing)
+  - Causal unlock chain (context_hints injected into observation)
+"""
+
+import sys
+import os
+import copy
+
+import pytest
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from server.mutator import mutate_task
+from server.tasks import TASKS
+from server.grader import CodeReviewGrader
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+TASK6 = TASKS[6]   # causal chain task
+
+
+def _grader(task):
+    return CodeReviewGrader(task)
+
+
+# ===========================================================================
+# MUTATOR TESTS
+# ===========================================================================
+
+class TestMutator:
+
+    def test_returns_deep_copy(self):
+        """mutate_task must not modify the original TASKS entry."""
+        original_code = TASKS[1]["code"]
+        _ = mutate_task(TASKS[1], seed=0)
+        assert TASKS[1]["code"] == original_code
+
+    def test_mutation_seed_tag(self):
+        """Mutated task carries _mutation_seed matching the supplied seed."""
+        t = mutate_task(TASKS[1], seed=42)
+        assert t["_mutation_seed"] == 42
+
+    def test_different_seeds_differ(self):
+        """Two different seeds should (almost always) produce different code."""
+        t1 = mutate_task(TASKS[1], seed=0)
+        t2 = mutate_task(TASKS[1], seed=1)
+        # At minimum the blank-line insert shifts are different; codes differ
+        assert t1["code"] != TASKS[1]["code"] or t2["code"] != TASKS[1]["code"]
+
+    def test_same_seed_is_deterministic(self):
+        """Same seed must always produce identical output."""
+        t1 = mutate_task(TASKS[2], seed=99)
+        t2 = mutate_task(TASKS[2], seed=99)
+        assert t1["code"] == t2["code"]
+        assert t1["issues"] == t2["issues"]
+
+    def test_line_shift_applied(self):
+        """Line shift must move every issue line_range down by exactly 1."""
+        original = copy.deepcopy(TASKS[1])
+        mutated = mutate_task(TASKS[1], seed=7)
+        orig_ranges = [iss["line_range"] for iss in original["issues"]]
+        mut_ranges = [iss["line_range"] for iss in mutated["issues"]]
+        for orig_r, mut_r in zip(orig_ranges, mut_ranges):
+            assert mut_r[0] == orig_r[0] + 1
+            assert mut_r[1] == orig_r[1] + 1
+
+    def test_issue_count_preserved(self):
+        """Mutation must not add or remove issues."""
+        for task in TASKS[:6]:   # skip task 6 here, tested separately
+            mutated = mutate_task(task, seed=5)
+            assert len(mutated["issues"]) == len(task["issues"])
+
+    def test_issue_ids_preserved(self):
+        """Issue ids must be unchanged after mutation."""
+        original_ids = [i["id"] for i in TASKS[2]["issues"]]
+        mutated_ids = [i["id"] for i in mutate_task(TASKS[2], seed=3)["issues"]]
+        assert original_ids == mutated_ids
+
+    def test_grader_still_matches_after_mutation(self):
+        """
+        The grader must still award credit after mutation.
+        Use the off-by-one issue in task 1 — keyword 'range' is always present
+        and line_range shifts by exactly 1.
+        """
+        mutated = mutate_task(TASKS[1], seed=10)
+        g = _grader(mutated)
+        off_by_one = next(i for i in mutated["issues"] if i["id"] == "off_by_one")
+        target_line = off_by_one["line_range"][0]
+
+        score, found, _ = g.score_comment(
+            line_number=target_line,
+            comment="off-by-one error: range(len + 1) causes IndexError on the last iteration",
+            already_found=[],
+        )
+        assert "off_by_one" in found
+        assert score > 0.0
+
+    def test_correct_decision_preserved(self):
+        """correct_decision must be unchanged by mutation."""
+        for task in TASKS:
+            mutated = mutate_task(task, seed=1)
+            assert mutated["correct_decision"] == task["correct_decision"]
+
+
+# ===========================================================================
+# TASK 6 STRUCTURE TESTS
+# ===========================================================================
+
+class TestTask6Structure:
+
+    def test_task6_exists(self):
+        assert len(TASKS) >= 7, "Task 6 (causal chain) must exist in TASKS"
+
+    def test_task6_has_context_hints(self):
+        assert "context_hints" in TASK6
+        assert len(TASK6["context_hints"]) >= 2
+
+    def test_task6_unlock_keys_present(self):
+        """Every 'unlocks' key in an issue must exist in context_hints dict."""
+        hints = TASK6["context_hints"]
+        for issue in TASK6["issues"]:
+            key = issue.get("unlocks")
+            if key:
+                assert key in hints, f"Issue {issue['id']} unlocks '{key}' but key not in context_hints"
+
+    def test_task6_total_weight_positive(self):
+        g = _grader(TASK6)
+        assert g.total_weight > 0.0
+
+    def test_task6_has_chained_issues(self):
+        """At least two issues must have an 'unlocks' field."""
+        unlocking = [i for i in TASK6["issues"] if i.get("unlocks")]
+        assert len(unlocking) >= 2
+
+    def test_task6_correct_decision(self):
+        assert TASK6["correct_decision"] == "request_changes"
+
+
+# ===========================================================================
+# CAUSAL UNLOCK CHAIN TESTS (environment layer)
+# ===========================================================================
+
+class TestCausalUnlock:
+    """
+    Test the unlock mechanic via the environment's _unlock_causal_hints helper
+    and _handle_add_comment pipeline.
+    """
+
+    def _make_env(self):
+        """Return a fresh environment instance fast-forwarded to task 6."""
+        import asyncio
+        try:
+            from server.CodeReviewAgent_environment import CodereviewagentEnvironment
+        except ImportError:
+            from CodeReviewAgent_environment import CodereviewagentEnvironment  # type: ignore
+
+        env = CodereviewagentEnvironment()
+        # force-set episode to task 6 (bypass cycling for test speed)
+        from server.mutator import mutate_task as _mt
+        task = _mt(TASK6, seed=0)
+        from server.grader import CodeReviewGrader as _G
+        env._grader = _G(task)
+        env._ep = env._fresh_episode(task)
+        return env
+
+    def test_no_hints_at_start(self):
+        env = self._make_env()
+        assert env._ep["context_hints"] == []
+
+    def test_unlock_fires_after_finding_trigger_issue(self):
+        """Finding hardcoded_jwt_secret must append db_schema_hint."""
+        env = self._make_env()
+        jwt_issue = next(i for i in env._ep["task"]["issues"] if i["id"] == "hardcoded_jwt_secret")
+        target_line = jwt_issue["line_range"][0]
+
+        env._step_count = 1
+        reward = env._handle_add_comment(
+            type("A", (), {
+                "line_number": target_line,
+                "comment": "JWT_SECRET is hardcoded — must be loaded from environment variable to prevent token forgery",
+                "severity": type("S", (), {"value": "critical"})(),
+                "category": type("C", (), {"value": "security"})(),
+            })()
+        )
+        assert "hardcoded_jwt_secret" in env._ep["issues_found"]
+        assert len(env._ep["context_hints"]) == 1
+        assert "db_schema_hint" in env._ep["hints_unlocked"]
+        assert "DB Schema" in env._ep["context_hints"][0]
+
+    def test_unlock_fires_only_once(self):
+        """The same hint must not be appended twice even if issue found again."""
+        env = self._make_env()
+        jwt_issue = next(i for i in env._ep["task"]["issues"] if i["id"] == "hardcoded_jwt_secret")
+        target_line = jwt_issue["line_range"][0]
+
+        for _ in range(3):
+            env._step_count += 1
+            env._handle_add_comment(
+                type("A", (), {
+                    "line_number": target_line,
+                    "comment": "JWT_SECRET is hardcoded — must be loaded from environment variable",
+                    "severity": type("S", (), {"value": "critical"})(),
+                    "category": type("C", (), {"value": "security"})(),
+                })()
+            )
+        assert len(env._ep["context_hints"]) == 1
+
+    def test_second_unlock_fires_independently(self):
+        """Finding no_rate_limit must append nginx_config_hint independently."""
+        env = self._make_env()
+        rate_issue = next(i for i in env._ep["task"]["issues"] if i["id"] == "no_rate_limit")
+        target_line = rate_issue["line_range"][0]
+
+        env._step_count = 1
+        env._handle_add_comment(
+            type("A", (), {
+                "line_number": target_line,
+                "comment": "No rate limiting on /auth endpoint — susceptible to brute-force attacks",
+                "severity": type("S", (), {"value": "error"})(),
+                "category": type("C", (), {"value": "security"})(),
+            })()
+        )
+        assert "nginx_config_hint" in env._ep["hints_unlocked"]
+        assert any("nginx" in h.lower() for h in env._ep["context_hints"])
+
+    def test_both_unlocks_can_fire_in_same_episode(self):
+        """Both hints can be unlocked within one episode."""
+        env = self._make_env()
+        task = env._ep["task"]
+
+        jwt_issue = next(i for i in task["issues"] if i["id"] == "hardcoded_jwt_secret")
+        rate_issue = next(i for i in task["issues"] if i["id"] == "no_rate_limit")
+
+        for step, (issue, kw) in enumerate([
+            (jwt_issue, "JWT_SECRET is hardcoded — must be loaded from environment variable to prevent forgery"),
+            (rate_issue, "No rate limiting on /auth endpoint — susceptible to brute-force attacks"),
+        ], start=1):
+            env._step_count = step
+            env._handle_add_comment(
+                type("A", (), {
+                    "line_number": issue["line_range"][0],
+                    "comment": kw,
+                    "severity": type("S", (), {"value": "critical"})(),
+                    "category": type("C", (), {"value": "security"})(),
+                })()
+            )
+
+        assert len(env._ep["context_hints"]) == 2
+        assert env._ep["hints_unlocked"] == {"db_schema_hint", "nginx_config_hint"}
+
+    def test_context_hints_appear_in_observation(self):
+        """context_hints list must be non-empty in the observation after an unlock."""
+        env = self._make_env()
+        jwt_issue = next(i for i in env._ep["task"]["issues"] if i["id"] == "hardcoded_jwt_secret")
+        env._step_count = 1
+        env._handle_add_comment(
+            type("A", (), {
+                "line_number": jwt_issue["line_range"][0],
+                "comment": "JWT_SECRET is hardcoded — must be loaded from environment variable",
+                "severity": type("S", (), {"value": "critical"})(),
+                "category": type("C", (), {"value": "security"})(),
+            })()
+        )
+        obs = env._make_obs(reward=0.0, done=False)
+        assert len(obs.context_hints) == 1
+        assert "DB Schema" in obs.context_hints[0]
+
+
+# ===========================================================================
+# GET_CONTEXT ACTION TESTS
+# ===========================================================================
+
+class TestGetContext:
+
+    def _make_env(self):
+        try:
+            from server.CodeReviewAgent_environment import CodereviewagentEnvironment
+        except ImportError:
+            from CodeReviewAgent_environment import CodereviewagentEnvironment  # type: ignore
+        from server.mutator import mutate_task as _mt
+        from server.grader import CodeReviewGrader as _G
+        env = CodereviewagentEnvironment()
+        task = _mt(TASKS[1], seed=0)
+        env._grader = _G(task)
+        env._ep = env._fresh_episode(task)
+        return env
+
+    def test_get_context_near_issue_no_penalty(self):
+        """Probing a line near a real issue must cost 0.0."""
+        env = self._make_env()
+        issue_line = env._ep["task"]["issues"][0]["line_range"][0]
+        env._step_count = 1
+        reward = env._handle_get_context(
+            type("A", (), {"line_number": issue_line})()
+        )
+        assert reward.total == 0.0
+        assert reward.passed is True
+
+    def test_get_context_far_from_issue_costs_penalty(self):
+        """Probing a line far from any issue must cost -0.01."""
+        env = self._make_env()
+        env._step_count = 1
+        reward = env._handle_get_context(
+            type("A", (), {"line_number": 999})()
+        )
+        assert reward.total == pytest.approx(-0.01, abs=0.001)
+        assert reward.passed is False
+
+    def test_get_context_no_line_number_penalised(self):
+        """GET_CONTEXT with no line_number must return -0.02."""
+        env = self._make_env()
+        env._step_count = 1
+        reward = env._handle_get_context(
+            type("A", (), {"line_number": None})()
+        )
+        assert reward.total == pytest.approx(-0.02, abs=0.001)
+
+    def test_get_context_snippet_stored_in_history(self):
+        """The context probe must be recorded in review_comments."""
+        env = self._make_env()
+        env._step_count = 1
+        env._handle_get_context(
+            type("A", (), {"line_number": 4})()
+        )
+        probes = [c for c in env._ep["review_comments"] if c.get("type") == "context_probe"]
+        assert len(probes) == 1
+        assert probes[0]["line"] == 4
+        assert "context" in probes[0]
+
+    def test_get_context_snippet_contains_requested_line(self):
+        """The returned snippet must reference the requested line number."""
+        env = self._make_env()
+        env._step_count = 1
+        reward = env._handle_get_context(
+            type("A", (), {"line_number": 4})()
+        )
+        # explanation contains the formatted snippet with line numbers
+        assert "4:" in reward.explanation or "4 :" in reward.explanation

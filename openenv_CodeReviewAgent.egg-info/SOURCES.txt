@@ -1,4 +1,7 @@
 README.md
+__init__.py
+client.py
+models.py
 pyproject.toml
 ./__init__.py
 ./client.py
@@ -14,3 +17,4 @@ server/__init__.py
 server/app.py
 server/grader.py
 server/tasks.py
+tests/test_grader.py

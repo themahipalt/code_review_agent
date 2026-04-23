@@ -1,5 +1,5 @@
 """
-Async FastAPI server for the CodeReviewAgent environment.
+Async FastAPI server for the PRobe environment.
 
 Endpoints:
   POST /reset              — start a new episode (HTTP session)
@@ -20,9 +20,11 @@ falls back to a minimal HTML redirect page.
 from __future__ import annotations
 
 import json
+import logging
 from contextlib import asynccontextmanager
 from typing import Any
 
+import uvicorn
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 
@@ -33,22 +35,24 @@ except Exception:  # pragma: no cover
     _OPENENV_AVAILABLE = False
 
 try:
-    from ..models import CodereviewagentAction, CodereviewagentObservation, RewardType
-    from .CodeReviewAgent_environment import CodereviewagentEnvironment
+    from ..models import ProbeAction, ProbeObservation, RewardType
+    from .CodeReviewAgent_environment import ProbeEnvironment
 except ModuleNotFoundError:
-    from models import CodereviewagentAction, CodereviewagentObservation, RewardType  # type: ignore
-    from server.CodeReviewAgent_environment import CodereviewagentEnvironment  # type: ignore
+    from models import ProbeAction, ProbeObservation, RewardType  # type: ignore
+    from server.CodeReviewAgent_environment import ProbeEnvironment  # type: ignore
+
+log = logging.getLogger(__name__)
 
 
 # ── Shared HTTP session env ───────────────────────────────────────────────────
 
-_http_env: CodereviewagentEnvironment | None = None
+_http_env: ProbeEnvironment | None = None
 
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     global _http_env
-    _http_env = CodereviewagentEnvironment()
+    _http_env = ProbeEnvironment()
     yield
     _http_env = None
 
@@ -58,7 +62,7 @@ async def lifespan(application: FastAPI):
 class StepResponse:
     def __init__(
         self,
-        obs: CodereviewagentObservation,
+        obs: ProbeObservation,
         reward: RewardType,
         done: bool,
         info: dict[str, Any],
@@ -81,7 +85,7 @@ class StepResponse:
 
 def _build_app() -> FastAPI:
     application = FastAPI(
-        title="CodeReviewAgent",
+        title="PRobe",
         description="OpenEnv code-review environment — async FastAPI server.",
         version="2.0.0",
         lifespan=lifespan,
@@ -91,19 +95,22 @@ def _build_app() -> FastAPI:
 
     @application.post("/reset", summary="Start a new episode")
     async def reset_endpoint() -> dict[str, Any]:
-        assert _http_env is not None
+        if _http_env is None:
+            raise HTTPException(status_code=503, detail="Environment not initialised")
         obs = await _http_env.async_reset()
         return {"observation": obs.model_dump(), "reward": None, "done": False, "info": {}}
 
     @application.post("/step", summary="Execute one action")
-    async def step_endpoint(action: CodereviewagentAction) -> dict[str, Any]:
-        assert _http_env is not None
+    async def step_endpoint(action: ProbeAction) -> dict[str, Any]:
+        if _http_env is None:
+            raise HTTPException(status_code=503, detail="Environment not initialised")
         obs, reward, done, info = await _http_env.async_step(action)
         return StepResponse(obs, reward, done, info).to_dict()
 
     @application.get("/state", summary="Current episode state snapshot")
     async def state_endpoint() -> dict[str, Any]:
-        assert _http_env is not None
+        if _http_env is None:
+            raise HTTPException(status_code=503, detail="Environment not initialised")
         return await _http_env.async_state()
 
     @application.get("/health", summary="Liveness probe")
@@ -113,8 +120,8 @@ def _build_app() -> FastAPI:
     @application.get("/schema", summary="Action and observation JSON schemas")
     async def schema() -> dict[str, Any]:
         return {
-            "action": CodereviewagentAction.model_json_schema(),
-            "observation": CodereviewagentObservation.model_json_schema(),
+            "action": ProbeAction.model_json_schema(),
+            "observation": ProbeObservation.model_json_schema(),
             "reward": RewardType.model_json_schema(),
         }
 
@@ -123,7 +130,7 @@ def _build_app() -> FastAPI:
     @application.websocket("/ws")
     async def ws_endpoint(websocket: WebSocket) -> None:
         await websocket.accept()
-        env = CodereviewagentEnvironment()
+        env = ProbeEnvironment()
         try:
             while True:
                 raw = await websocket.receive_text()
@@ -138,7 +145,7 @@ def _build_app() -> FastAPI:
 
                 elif cmd == "step":
                     try:
-                        action = CodereviewagentAction(**msg["action"])
+                        action = ProbeAction(**msg["action"])
                     except Exception as exc:
                         await websocket.send_json({"type": "error", "detail": str(exc)})
                         continue
@@ -170,9 +177,9 @@ def _build_app() -> FastAPI:
     @application.get("/web", response_class=HTMLResponse, include_in_schema=False)
     async def web_ui() -> str:
         return """
-        <!doctype html><html><head><title>CodeReviewAgent</title></head>
-        <body>
-        <h2>CodeReviewAgent Environment</h2>
+        <!doctype html><html><head><title>PRobe</title></head>
+        <body style="font-family:sans-serif;padding:2rem">
+        <h2>PRobe Environment</h2>
         <p>API docs: <a href="/docs">/docs</a></p>
         <p>Health: <a href="/health">/health</a></p>
         <p>Schema: <a href="/schema">/schema</a></p>
@@ -185,8 +192,7 @@ def _build_app() -> FastAPI:
 app = _build_app()
 
 
-def main(host: str = "0.0.0.0", port: int = 8000) -> None:
-    import uvicorn
+def main(host: str = "0.0.0.0", port: int = 8000) -> None:  # noqa: S104
     uvicorn.run(app, host=host, port=port)
 
 

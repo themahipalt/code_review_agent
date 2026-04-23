@@ -1,0 +1,719 @@
+﻿"""
+Task definitions for the CodeReviewAgent environment.
+
+Six tasks across four difficulty tiers. Each task defines:
+  - code: Python source to review
+  - issues: list of ground-truth issues with grading metadata
+  - correct_decision: expected final review decision
+
+Difficulty ladder:
+  0  ultra-easy  — hints embedded in comments; bootstraps GRPO positive trajectories
+  1  easy        — 3 clean logic bugs, no hints
+  2  medium      — 5 security issues in an auth module
+  3  hard        — 7 mixed issues in a data pipeline
+  4  medium      — 5 async concurrency bugs
+  5  hard        — 6 Flask API security issues
+"""
+
+from typing import Any
+
+TASKS: list[dict[str, Any]] = [
+    # ── Task 0: Ultra-easy (bootstrap) ───────────────────────────────────────
+    # DESIGN INTENT: both issues have their category name spelled out in a code
+    # comment directly above them.  A frozen weak model that simply reads the
+    # comments and echoes them back should reliably score > 0.  This task exists
+    # solely to guarantee that GRPO has at least a few positive trajectories from
+    # training step 1.
+    {
+        "id": 0,
+        "name": "Bootstrap: Obvious Issues",
+        "difficulty": "ultra-easy",
+        "file_name": "bootstrap.py",
+        "description": (
+            "Review this short Python module. "
+            "The comments above each function hint at the kind of issue present. "
+            "Add a comment for each bug you find (line number, severity, category), "
+            "call request_changes, then submit."
+        ),
+        "max_steps": 6,
+        "code": """\
+# BUG: this loop has an off-by-one error — it iterates one index too far
+def sum_items(data):
+    total = 0
+    for i in range(len(data) + 1):   # line 4: causes IndexError on last iteration
+        total += data[i]
+    return total
+
+
+# SECURITY: hardcoded credential — move to environment variable
+def connect_db():
+    db_password = "s3cr3t_prod_pw"   # line 11: hardcoded credential in source
+    return f"postgresql://admin:{db_password}@localhost/mydb"
+""",
+        "issues": [
+            {
+                "id": "bootstrap_off_by_one",
+                "description": "Off-by-one: range(len+1) causes IndexError on the last iteration",
+                "line_range": (4, 4),
+                "keywords": [
+                    "off-by-one", "off by one", "bug", "index", "indexerror",
+                    "range", "+ 1", "len + 1", "out of bounds",
+                ],
+                "category": "bug",
+                "severity": "error",
+                "weight": 1.0,
+            },
+            {
+                "id": "bootstrap_hardcoded_cred",
+                "description": "Hardcoded password in source should be an environment variable",
+                "line_range": (11, 11),
+                "keywords": [
+                    "hardcoded", "hard-coded", "security", "credential", "password",
+                    "secret", "env", "environment variable", "os.environ",
+                ],
+                "category": "security",
+                "severity": "critical",
+                "weight": 1.0,
+            },
+        ],
+        "correct_decision": "request_changes",
+    },
+
+    # ── Task 1: Easy ─────────────────────────────────────────────────────────
+    {
+        "id": 1,
+        "name": "Basic Bug Detection",
+        "difficulty": "easy",
+        "file_name": "utils.py",
+        "description": (
+            "Review this Python utility module. "
+            "Identify any bugs, logical errors, or code quality issues. "
+            "Add a comment for each issue you find (include line number, severity, "
+            "and category), then submit your review."
+        ),
+        "max_steps": 15,
+        "code": """\
+def calculate_average(numbers):
+    \"\"\"Calculate the average of a list of numbers.\"\"\"
+    total = 0
+    for i in range(len(numbers) + 1):  # line 4
+        total += numbers[i]
+    average = total / len(numbers)
+    unused_result = sorted(numbers)  # line 7
+    return average
+
+
+def find_max(items):
+    \"\"\"Return the maximum value in a list.\"\"\"
+    if len(items) == 0:
+        return None
+    max_val = items[0]
+    for item in items:
+        if item > max_val:
+            max_val == item  # line 17: should be =, not ==
+    return max_val
+
+
+def is_palindrome(s):
+    \"\"\"Check if a string is a palindrome.\"\"\"
+    return s == s[::-1]
+""",
+        "issues": [
+            {
+                "id": "off_by_one",
+                "description": "Off-by-one: range(len+1) causes IndexError on the last iteration",
+                "line_range": (4, 5),
+                "keywords": [
+                    "off-by-one", "off by one", "range", "index", "indexerror",
+                    "out of bounds", "len + 1", "+ 1", "index out",
+                ],
+                "category": "bug",
+                "severity": "error",
+                "weight": 1.0,
+            },
+            {
+                "id": "unused_variable",
+                "description": "unused_result is assigned but never used",
+                "line_range": (7, 7),
+                "keywords": [
+                    "unused", "unused_result", "never used", "dead code",
+                    "not used", "unnecessary",
+                ],
+                "category": "style",
+                "severity": "info",
+                "weight": 0.5,
+            },
+            {
+                "id": "assignment_not_update",
+                "description": "max_val == item uses == (comparison) instead of = (assignment); max is never updated",
+                "line_range": (17, 17),
+                "keywords": [
+                    "==", "assignment", "comparison", "max_val", "never update",
+                    "not updating", "wrong operator", "should be =", "max never",
+                ],
+                "category": "bug",
+                "severity": "error",
+                "weight": 1.0,
+            },
+        ],
+        "correct_decision": "request_changes",
+    },
+
+    # ── Task 2: Medium ───────────────────────────────────────────────────────
+    {
+        "id": 2,
+        "name": "Security Vulnerability Review",
+        "difficulty": "medium",
+        "file_name": "auth.py",
+        "description": (
+            "Review this authentication module for security vulnerabilities. "
+            "Pay careful attention to credential handling, input sanitization, "
+            "and cryptographic choices. Annotate every issue with its severity "
+            "and category, then submit your review."
+        ),
+        "max_steps": 20,
+        "code": """\
+import sqlite3
+import hashlib
+import os
+
+DB_PASSWORD = "super_secret_123"   # line 5
+ADMIN_TOKEN = "tok_admin_abc123"   # line 6
+
+def authenticate_user(username, password):
+    \"\"\"Authenticate a user against the database.\"\"\"
+    conn = sqlite3.connect('app.db')
+    cursor = conn.cursor()
+    # line 12: f-string interpolation → SQL injection
+    query = f"SELECT * FROM users WHERE username = '{username}' AND password = '{password}'"
+    cursor.execute(query)
+    user = cursor.fetchone()
+    conn.close()
+    return user is not None
+
+
+def hash_password(password):
+    \"\"\"Hash a password for storage.\"\"\"
+    return hashlib.md5(password.encode()).hexdigest()  # line 21
+
+
+def execute_admin_command(command):
+    \"\"\"Execute an admin maintenance command.\"\"\"
+    result = eval(command)   # line 25
+    return result
+
+
+def get_user_data(user_id):
+    \"\"\"Fetch user profile from internal service.\"\"\"
+    import requests
+    url = f"https://internal-api/users/{user_id}"
+    response = requests.get(url, verify=False)  # line 32
+    return response.json()
+""",
+        "issues": [
+            {
+                "id": "hardcoded_credentials",
+                "description": "Credentials hard-coded in source (lines 5-6)",
+                "line_range": (5, 6),
+                "keywords": [
+                    "hardcoded", "hard-coded", "hard coded", "hardcode",
+                    "db_password", "admin_token", "plaintext credential",
+                    "environment variable", "env var", "os.environ",
+                ],
+                "category": "security",
+                "severity": "critical",
+                "weight": 1.0,
+            },
+            {
+                "id": "sql_injection",
+                "description": "SQL injection via unsanitised f-string interpolation",
+                "line_range": (12, 14),
+                "keywords": [
+                    "sql injection", "sql", "injection", "f-string", "parameterized",
+                    "sanitize", "escape", "prepared statement", "placeholder",
+                ],
+                "category": "security",
+                "severity": "critical",
+                "weight": 1.0,
+            },
+            {
+                "id": "weak_hashing",
+                "description": "MD5 is cryptographically broken for password storage",
+                "line_range": (21, 21),
+                "keywords": [
+                    "md5", "weak", "bcrypt", "argon2", "pbkdf2", "scrypt",
+                    "cryptographic", "password hashing", "hash", "broken",
+                ],
+                "category": "security",
+                "severity": "error",
+                "weight": 0.75,
+            },
+            {
+                "id": "arbitrary_code_execution",
+                "description": "eval() on untrusted input allows arbitrary code execution",
+                "line_range": (25, 25),
+                "keywords": [
+                    "eval", "arbitrary code", "code execution", "rce",
+                    "remote code", "dangerous", "unsafe",
+                ],
+                "category": "security",
+                "severity": "critical",
+                "weight": 1.0,
+            },
+            {
+                "id": "ssl_verification_disabled",
+                "description": "verify=False disables TLS cert validation, enabling MITM attacks",
+                "line_range": (32, 32),
+                "keywords": [
+                    "ssl", "verify", "certificate", "mitm",
+                    "man-in-the-middle", "tls", "verify=false", "cert",
+                ],
+                "category": "security",
+                "severity": "error",
+                "weight": 0.75,
+            },
+        ],
+        "correct_decision": "request_changes",
+    },
+
+    # ── Task 3: Hard ─────────────────────────────────────────────────────────
+    {
+        "id": 3,
+        "name": "Full Architecture and Performance Review",
+        "difficulty": "hard",
+        "file_name": "data_pipeline.py",
+        "description": (
+            "Perform a comprehensive review of this data pipeline. "
+            "Identify bugs, security vulnerabilities, performance bottlenecks, "
+            "and architectural design issues. Each comment should clearly explain "
+            "the problem and suggest a fix. Submit your review when done."
+        ),
+        "max_steps": 30,
+        "code": """\
+import requests
+import json
+import time
+from threading import Thread
+
+API_KEY = "sk-prod-abc123def456"   # line 6
+
+
+class DataPipeline:
+    def __init__(self, endpoint):
+        self.endpoint = endpoint
+        self.results = []
+        self.cache = {}   # line 13: unbounded
+
+    def fetch_batch(self, item_ids):
+        \"\"\"Fetch items from the API.\"\"\"
+        items = []
+        for item_id in item_ids:   # line 17: N+1 pattern
+            response = requests.get(
+                f"{self.endpoint}/items/{item_id}",
+                headers={"Authorization": f"Bearer {API_KEY}"},
+                verify=False,   # line 22
+            )
+            items.append(response.json())
+        return items
+
+    def process_items(self, items):
+        \"\"\"Transform items for storage.\"\"\"
+        results = []
+        for i in range(len(items)):   # line 28: use enumerate
+            item = items[i]
+            transformed = {
+                "id": item["id"],          # line 31: KeyError not handled
+                "value": item["value"] * 2,
+                "label": item.get("label", "unknown"),
+            }
+            results.append(transformed)
+            self.cache[item["id"]] = transformed   # line 36
+        return results
+
+    def run_async(self, func, *args):
+        \"\"\"Run function in a background thread.\"\"\"
+        t = Thread(target=func, args=args)
+        t.start()
+        # line 43: thread not tracked or joined — resource leak
+
+    def save_results(self, results, output_path):
+        \"\"\"Persist results to disk.\"\"\"
+        with open(output_path, "w") as f:
+            json.dump(results, f)
+
+    def retry_failed(self, failed_ids, max_retries=10):   # line 50
+        \"\"\"Re-fetch items that previously failed.\"\"\"
+        for item_id in failed_ids:
+            for attempt in range(max_retries):
+                try:
+                    result = requests.get(
+                        f"{self.endpoint}/items/{item_id}"
+                    )
+                    if result.status_code == 200:
+                        self.results.append(result.json())
+                        break
+                except Exception:
+                    time.sleep(1)   # line 60: no exponential backoff
+""",
+        "issues": [
+            {
+                "id": "hardcoded_api_key",
+                "description": "API key hard-coded in source instead of an environment variable",
+                "line_range": (6, 6),
+                "keywords": [
+                    "hardcoded", "hard-coded", "hardcode", "api key", "api_key",
+                    "environment variable", "env var", "os.environ", "sk-prod",
+                ],
+                "category": "security",
+                "severity": "critical",
+                "weight": 1.0,
+            },
+            {
+                "id": "n_plus_one_requests",
+                "description": "One HTTP request per item (N+1 pattern); should use a bulk/batch endpoint",
+                "line_range": (17, 24),
+                "keywords": [
+                    "n+1", "n plus 1", "batch", "bulk", "loop",
+                    "individual request", "serial", "one request per",
+                ],
+                "category": "performance",
+                "severity": "error",
+                "weight": 1.0,
+            },
+            {
+                "id": "ssl_disabled",
+                "description": "SSL certificate verification disabled (verify=False)",
+                "line_range": (22, 22),
+                "keywords": [
+                    "ssl", "verify", "certificate", "tls",
+                    "mitm", "verify=false", "cert",
+                ],
+                "category": "security",
+                "severity": "error",
+                "weight": 0.75,
+            },
+            {
+                "id": "missing_key_error_handling",
+                "description": "Direct dict access item['id'] / item['value'] raises KeyError on unexpected payloads",
+                "line_range": (31, 32),
+                "keywords": [
+                    "keyerror", "key error", "error handling", "missing key",
+                    "exception", "try", ".get(", "dict access",
+                ],
+                "category": "bug",
+                "severity": "warning",
+                "weight": 0.75,
+            },
+            {
+                "id": "unbounded_cache",
+                "description": "self.cache grows without bound; will cause OOM on large inputs",
+                "line_range": (13, 13),
+                "keywords": [
+                    "unbounded", "memory leak", "cache size", "limit",
+                    "lru", "eviction", "grow", "oom", "memory",
+                ],
+                "category": "design",
+                "severity": "warning",
+                "weight": 0.75,
+            },
+            {
+                "id": "thread_not_joined",
+                "description": "Thread is started but never stored or joined — silent resource/exception leak",
+                "line_range": (40, 43),
+                "keywords": [
+                    "thread", "join", "track", "resource leak",
+                    "daemon", "not joined", "not tracked",
+                ],
+                "category": "bug",
+                "severity": "error",
+                "weight": 1.0,
+            },
+            {
+                "id": "no_exponential_backoff",
+                "description": "Retry loop sleeps 1 s flat; needs exponential backoff to avoid hammering the API",
+                "line_range": (50, 60),
+                "keywords": [
+                    "backoff", "exponential", "retry", "sleep", "rate limit",
+                    "jitter", "aggressive",
+                ],
+                "category": "design",
+                "severity": "warning",
+                "weight": 0.5,
+            },
+        ],
+        "correct_decision": "request_changes",
+    },
+
+    # ── Task 4: Medium — Async Concurrency ───────────────────────────────
+    {
+        "id": 4,
+        "name": "Async Worker Review",
+        "difficulty": "medium",
+        "file_name": "async_worker.py",
+        "description": (
+            "Review this async worker module for concurrency bugs, "
+            "resource leaks, and exception-handling problems. "
+            "Comment on every issue with its line number, severity, "
+            "and category, then submit your review."
+        ),
+        "max_steps": 20,
+        "code": """\
+import asyncio
+import aiohttp
+
+_counter = 0           # line 3: shared mutable state, not thread/task-safe
+
+async def fetch_url(url: str) -> dict:
+    \"\"\"Fetch a URL and return JSON.\"\"\"
+    session = aiohttp.ClientSession()   # line 7: session never closed → resource leak
+    async with session.get(url) as resp:
+        return await resp.json()
+
+
+async def increment_and_fetch(url: str) -> dict:
+    \"\"\"Increment shared counter then fetch.\"\"\"
+    global _counter
+    _counter += 1          # line 15: race condition — not atomic in concurrent tasks
+    data = fetch_url(url)  # line 16: missing await → returns coroutine, not result
+    return data
+
+
+async def run_all(urls: list) -> list:
+    \"\"\"Run all fetches concurrently.\"\"\"
+    tasks = [increment_and_fetch(u) for u in urls]
+    results = []
+    for coro in tasks:
+        try:
+            result = await coro
+            results.append(result)
+        except Exception:
+            pass           # line 27: swallows all exceptions silently
+    return results
+
+
+async def retry_fetch(url: str, retries: int = 3) -> dict:
+    \"\"\"Fetch with retry logic.\"\"\"
+    for attempt in range(retries):
+        try:
+            return await fetch_url(url)
+        except Exception as e:
+            if attempt == retries - 1:
+                raise
+            await asyncio.sleep(1)  # line 38: flat sleep, no exponential backoff
+""",
+        "issues": [
+            {
+                "id": "shared_mutable_state",
+                "description": "Module-level _counter mutated by concurrent tasks without a lock",
+                "line_range": (3, 3),
+                "keywords": [
+                    "shared", "race condition", "thread-safe", "task-safe",
+                    "atomic", "lock", "asyncio.lock", "concurrent", "global",
+                    "mutable", "not safe",
+                ],
+                "category": "bug",
+                "severity": "error",
+                "weight": 1.0,
+            },
+            {
+                "id": "unclosed_session",
+                "description": "aiohttp.ClientSession created inside function is never closed → resource leak",
+                "line_range": (7, 9),
+                "keywords": [
+                    "session", "not closed", "resource leak", "close", "context manager",
+                    "async with", "clientsession", "leak", "aiohttp",
+                ],
+                "category": "bug",
+                "severity": "error",
+                "weight": 1.0,
+            },
+            {
+                "id": "missing_await",
+                "description": "fetch_url(url) called without await — returns unawaited coroutine",
+                "line_range": (16, 16),
+                "keywords": [
+                    "await", "missing await", "coroutine", "not awaited", "unawaited",
+                    "returns coroutine",
+                ],
+                "category": "bug",
+                "severity": "critical",
+                "weight": 1.0,
+            },
+            {
+                "id": "silent_exception",
+                "description": "bare except: pass swallows all exceptions, hiding errors",
+                "line_range": (27, 27),
+                "keywords": [
+                    "swallow", "silent", "bare except", "exception", "pass",
+                    "ignore", "hidden", "suppress", "logging",
+                ],
+                "category": "design",
+                "severity": "warning",
+                "weight": 0.75,
+            },
+            {
+                "id": "no_backoff",
+                "description": "Retry sleep is flat 1 s; should use exponential backoff with jitter",
+                "line_range": (38, 38),
+                "keywords": [
+                    "backoff", "exponential", "jitter", "retry", "sleep",
+                    "flat", "rate limit",
+                ],
+                "category": "design",
+                "severity": "warning",
+                "weight": 0.5,
+            },
+        ],
+        "correct_decision": "request_changes",
+    },
+
+    # ── Task 5: Hard — Flask API Vulnerabilities ──────────────────────────
+    {
+        "id": 5,
+        "name": "Flask API Security Review",
+        "difficulty": "hard",
+        "file_name": "api_server.py",
+        "description": (
+            "Perform a thorough security review of this Flask REST API. "
+            "Look for injection flaws, path traversal, insecure deserialization, "
+            "sensitive data exposure, and missing access controls. "
+            "Comment on every issue, then submit your review."
+        ),
+        "max_steps": 30,
+        "code": """\
+import os
+import pickle
+import subprocess
+import logging
+from flask import Flask, request, jsonify, send_file
+
+app = Flask(__name__)
+SECRET_KEY = "flask-secret-hardcoded"   # line 8
+logging.basicConfig(level=logging.DEBUG)
+
+
+@app.route("/run", methods=["POST"])
+def run_command():
+    \"\"\"Run a system command and return output.\"\"\"
+    cmd = request.json.get("command", "")
+    # line 15: unsanitised shell command → OS command injection
+    result = subprocess.check_output(cmd, shell=True, text=True)
+    return jsonify({"output": result})
+
+
+@app.route("/files", methods=["GET"])
+def get_file():
+    \"\"\"Serve a file from the data directory.\"\"\"
+    filename = request.args.get("name", "")
+    # line 23: no path normalisation → path traversal
+    path = os.path.join("/app/data", filename)
+    return send_file(path)
+
+
+@app.route("/load", methods=["POST"])
+def load_object():
+    \"\"\"Deserialise a user-supplied payload.\"\"\"
+    data = request.get_data()
+    # line 30: pickle.loads on untrusted data → arbitrary code execution
+    obj = pickle.loads(data)
+    return jsonify({"type": str(type(obj))})
+
+
+@app.route("/login", methods=["POST"])
+def login():
+    \"\"\"Authenticate and return a token.\"\"\"
+    username = request.json.get("username")
+    password = request.json.get("password")
+    # line 38: credentials logged at DEBUG level
+    logging.debug(f"Login attempt: username={username} password={password}")
+    if username == "admin" and password == SECRET_KEY:
+        return jsonify({"token": SECRET_KEY})   # line 41: secret returned in response
+    return jsonify({"error": "unauthorized"}), 401
+
+
+@app.route("/admin", methods=["GET"])
+def admin_panel():
+    \"\"\"Return admin data — no auth check.\"\"\"
+    # line 47: no authentication or authorisation check
+    return jsonify({"users": ["alice", "bob", "admin"], "config": {"debug": True}})
+""",
+        "issues": [
+            {
+                "id": "hardcoded_secret",
+                "description": "Flask SECRET_KEY hard-coded in source; should come from env var",
+                "line_range": (8, 8),
+                "keywords": [
+                    "hardcoded", "hard-coded", "secret_key", "environment variable",
+                    "env var", "os.environ", "secret", "hardcode",
+                ],
+                "category": "security",
+                "severity": "critical",
+                "weight": 0.75,
+            },
+            {
+                "id": "command_injection",
+                "description": "subprocess.check_output with shell=True and unsanitised user input → OS command injection",
+                "line_range": (15, 16),
+                "keywords": [
+                    "command injection", "shell injection", "shell=true", "subprocess",
+                    "os injection", "arbitrary command", "unsanitised", "sanitize",
+                    "injection",
+                ],
+                "category": "security",
+                "severity": "critical",
+                "weight": 1.0,
+            },
+            {
+                "id": "path_traversal",
+                "description": "No path normalisation allows ../../../etc/passwd-style traversal",
+                "line_range": (23, 24),
+                "keywords": [
+                    "path traversal", "directory traversal", "path normaliz",
+                    "os.path.abspath", "realpath", "../", "dot dot",
+                    "escape", "filename", "traversal",
+                ],
+                "category": "security",
+                "severity": "critical",
+                "weight": 1.0,
+            },
+            {
+                "id": "insecure_deserialization",
+                "description": "pickle.loads on untrusted user data allows arbitrary code execution",
+                "line_range": (30, 31),
+                "keywords": [
+                    "pickle", "deserialization", "deserialisation", "arbitrary code",
+                    "untrusted", "rce", "remote code", "insecure deserialization",
+                ],
+                "category": "security",
+                "severity": "critical",
+                "weight": 1.0,
+            },
+            {
+                "id": "credentials_in_logs",
+                "description": "Plaintext username and password written to DEBUG log",
+                "line_range": (38, 38),
+                "keywords": [
+                    "log", "logging", "credential", "password", "sensitive",
+                    "plaintext", "debug", "leak", "exposure",
+                ],
+                "category": "security",
+                "severity": "error",
+                "weight": 0.75,
+            },
+            {
+                "id": "missing_auth_check",
+                "description": "Admin endpoint has no authentication or authorisation guard",
+                "line_range": (47, 47),
+                "keywords": [
+                    "auth", "authentication", "authorization", "authorisation",
+                    "access control", "no check", "unprotected", "unauthenticated",
+                    "missing auth",
+                ],
+                "category": "security",
+                "severity": "critical",
+                "weight": 1.0,
+            },
+        ],
+        "correct_decision": "request_changes",
+    },
+]

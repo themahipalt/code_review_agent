@@ -1,40 +1,39 @@
-"""CodeReviewAgent Environment Client."""
+"""PRobe Environment Client."""
 
-from typing import Dict
+from __future__ import annotations
 
 from openenv.core import EnvClient
 from openenv.core.client_types import StepResult
 from openenv.core.env_server.types import State
 
-from .models import CodereviewagentAction, CodereviewagentObservation
+from .models import ProbeAction, ProbeObservation
 
 
-class CodereviewagentEnv(
-    EnvClient[CodereviewagentAction, CodereviewagentObservation, State]
-):
+class ProbeEnv(EnvClient[ProbeAction, ProbeObservation, State]):
     """
-    Client for the CodeReviewAgent environment.
+    Client for the PRobe environment.
 
     Maintains a persistent WebSocket connection to the server.
 
-    Example:
-        >>> with CodereviewagentEnv(base_url="http://localhost:8000") as env:
-        ...     result = env.reset()
-        ...     print(result.observation.task_description)
-        ...
-        ...     action = CodereviewagentAction(
-        ...         action_type="add_comment",
-        ...         line_number=4,
-        ...         comment="Off-by-one: range(len+1) causes IndexError",
-        ...         severity="error",
-        ...         category="bug",
-        ...     )
-        ...     result = env.step(action)
-        ...     print(result.reward)
+    Example::
+
+        with ProbeEnv(base_url="http://localhost:8000") as env:
+            result = env.reset()
+            print(result.observation.task_description)
+
+            action = ProbeAction(
+                action_type="add_comment",
+                line_number=4,
+                comment="Off-by-one: range(len+1) causes IndexError",
+                severity="error",
+                category="bug",
+            )
+            result = env.step(action)
+            print(result.reward)
     """
 
-    def _step_payload(self, action: CodereviewagentAction) -> Dict:
-        payload = {"action_type": action.action_type.value}
+    def _step_payload(self, action: ProbeAction) -> dict:
+        payload: dict = {"action_type": action.action_type.value}
         if action.line_number is not None:
             payload["line_number"] = action.line_number
         if action.comment is not None:
@@ -46,31 +45,19 @@ class CodereviewagentEnv(
         return payload
 
     def _parse_result(
-        self, payload: Dict
-    ) -> StepResult[CodereviewagentObservation]:
-        obs_data = payload.get("observation", {})
-        observation = CodereviewagentObservation(
-            code_snippet=obs_data.get("code_snippet", ""),
-            task_description=obs_data.get("task_description", ""),
-            file_name=obs_data.get("file_name", ""),
-            task_id=obs_data.get("task_id", 0),
-            task_difficulty=obs_data.get("task_difficulty", "easy"),
-            review_history=obs_data.get("review_history", []),
-            step_count=obs_data.get("step_count", 0),
-            max_steps=obs_data.get("max_steps", 20),
-            issues_found_count=obs_data.get("issues_found_count", 0),
-            total_issues=obs_data.get("total_issues", 0),
-            done=payload.get("done", False),
-            reward=payload.get("reward"),
-            metadata=obs_data.get("metadata", {}),
-        )
+        self, payload: dict
+    ) -> StepResult[ProbeObservation]:
+        obs_data: dict = payload.get("observation", {})
+        # Use model_validate so new fields added to ProbeObservation
+        # are picked up automatically without changing this method.
+        observation = ProbeObservation.model_validate(obs_data)
         return StepResult(
             observation=observation,
-            reward=payload.get("reward"),
-            done=payload.get("done", False),
+            reward=float(payload.get("reward") or 0.0),
+            done=bool(payload.get("done", False)),
         )
 
-    def _parse_state(self, payload: Dict) -> State:
+    def _parse_state(self, payload: dict) -> State:
         return State(
             episode_id=payload.get("episode_id"),
             step_count=payload.get("step_count", 0),
