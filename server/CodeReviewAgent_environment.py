@@ -1,0 +1,422 @@
+"""
+CodeReviewAgent Environment — async-native implementation.
+
+Episode lifecycle:
+  1. reset()  → ObservationType              (starts a new episode)
+  2. step(a)  → (Obs, RewardType, done, info) (execute one action)
+  3. state()  → dict                          (full internal snapshot)
+
+Tasks cycle automatically: 0 (ultra-easy) → 1 (easy) → … → 6 (causal chain) → 0 …
+
+Dynamic world features (v3)
+───────────────────────────
+• Code mutation   — each episode applies surface-level variable renames,
+                    a line shift, and a constant nudge so the agent must
+                    read the code rather than memorise tokens.
+• GET_CONTEXT     — the agent can spend a step probing a specific line to
+                    receive the surrounding ±5 lines of context.
+• Causal unlocks  — finding certain issues appends a new context hint to
+                    the observation, modelling real-world situations where
+                    one discovery leads to deeper investigation.
+
+Thread / task safety: each Environment instance owns its own state.
+For concurrent GRPO rollouts spin up one instance per worker.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import concurrent.futures
+import logging
+from typing import Any
+from uuid import uuid4
+
+from openenv.core.env_server.interfaces import Environment
+from openenv.core.env_server.types import State
+
+try:
+    from ..models import (
+        ActionType,
+        ProbeAction,
+        ProbeObservation,
+        RewardType,
+    )
+    from .grader import CodeReviewGrader, LINE_TOLERANCE
+    from .mutator import mutate_task
+    from .tasks import TASKS
+except ImportError:
+    from models import (  # type: ignore[no-redef]
+        ActionType,
+        ProbeAction,
+        ProbeObservation,
+        RewardType,
+    )
+    from server.grader import CodeReviewGrader, LINE_TOLERANCE  # type: ignore[no-redef]
+    from server.mutator import mutate_task       # type: ignore[no-redef]
+    from server.tasks import TASKS              # type: ignore[no-redef]
+
+log = logging.getLogger(__name__)
+
+
+class ProbeEnvironment(Environment):
+    """
+    PRobe — Pull Request Investigation Environment.
+
+    Public interface is fully async.  The sync wrappers (reset / step / state)
+    required by openenv's create_app are also provided; they delegate to the
+    async versions via asyncio.run() so they are safe to call from sync
+    contexts (e.g. tests without an event loop, openenv HTTP wrappers).
+    """
+
+    SUPPORTS_CONCURRENT_SESSIONS: bool = True
+
+    # ── Construction ──────────────────────────────────────────────────────
+
+    def __init__(self) -> None:
+        self._episode_id: str = str(uuid4())
+        self._step_count: int = 0
+        self._reset_count: int = 0
+        task = TASKS[0]
+        self._grader: CodeReviewGrader = CodeReviewGrader(task)
+        self._ep: dict[str, Any] = self._fresh_episode(task)
+
+    @staticmethod
+    def _fresh_episode(task: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "task": task,
+            "review_comments": [],
+            "issues_found": [],
+            "review_decision": None,
+            "review_submitted": False,
+            "cumulative_reward": 0.0,
+            # causal world-modeling state
+            "context_hints": [],          # list[str] of unlocked hint texts
+            "hints_unlocked": set(),      # set[str] of hint keys already fired
+        }
+
+    # ── Async-native interface (primary) ──────────────────────────────────
+
+    async def async_reset(self) -> ProbeObservation:
+        task_id = self._reset_count % len(TASKS)
+        seed = self._reset_count          # unique seed per episode
+        self._reset_count += 1
+        self._episode_id = str(uuid4())
+        self._step_count = 0
+        # Apply surface mutation so the agent cannot memorise tokens
+        task = mutate_task(TASKS[task_id], seed=seed)
+        self._grader = CodeReviewGrader(task)
+        self._ep = self._fresh_episode(task)
+        return self._make_obs(reward=0.0, done=False)
+
+    async def async_step(
+        self, action: ProbeAction
+    ) -> tuple[ProbeObservation, RewardType, bool, dict[str, Any]]:
+        self._step_count += 1
+        task = self._ep["task"]
+        done = False
+        reward_obj: RewardType
+
+        if action.action_type == ActionType.ADD_COMMENT:
+            reward_obj = self._handle_add_comment(action)
+
+        elif action.action_type == ActionType.GET_CONTEXT:
+            reward_obj = self._handle_get_context(action)
+
+        elif action.action_type == ActionType.REQUEST_CHANGES:
+            reward_obj = self._handle_request_changes(action)
+
+        elif action.action_type == ActionType.APPROVE:
+            reward_obj = self._handle_approve()
+
+        elif action.action_type == ActionType.SUBMIT_REVIEW:
+            reward_obj, done = self._handle_submit_review()
+
+        else:
+            reward_obj = RewardType(
+                total=-0.05,
+                components={"illegal_action": -0.05},
+                passed=False,
+                explanation=f"Unknown action type: {action.action_type}",
+                step=self._step_count,
+                terminal=False,
+            )
+
+        # Step-budget exhaustion
+        if not done and self._step_count >= task["max_steps"]:
+            # merge budget penalty into existing reward
+            penalised = max(-1.0, reward_obj.total - 0.05)
+            components = {**reward_obj.components, "step_budget_penalty": -0.05}
+            reward_obj = RewardType(
+                total=round(penalised, 4),
+                components=components,
+                passed=False,
+                explanation=reward_obj.explanation + " [Step limit reached.]",
+                step=self._step_count,
+                terminal=True,
+            )
+            done = True
+
+        self._ep["cumulative_reward"] = round(
+            self._ep["cumulative_reward"] + reward_obj.total, 4
+        )
+        obs = self._make_obs(reward=reward_obj.total, done=done)
+        info = {
+            "episode_id": self._episode_id,
+            "cumulative_reward": self._ep["cumulative_reward"],
+            "issues_found": list(self._ep["issues_found"]),
+            "review_decision": self._ep.get("review_decision"),
+        }
+        return obs, reward_obj, done, info
+
+    async def async_state(self) -> dict[str, Any]:
+        task = self._ep["task"]
+        return {
+            "episode_id": self._episode_id,
+            "step_count": self._step_count,
+            "task_id": task["id"],
+            "task_difficulty": task["difficulty"],
+            "task_name": task["name"],
+            "issues_found": list(self._ep["issues_found"]),
+            "total_issues": len(task["issues"]),
+            "review_decision": self._ep.get("review_decision"),
+            "review_submitted": self._ep.get("review_submitted", False),
+            "cumulative_reward": self._ep.get("cumulative_reward", 0.0),
+            "max_steps": task["max_steps"],
+        }
+
+    # ── Sync wrappers (openenv / create_app compatibility) ────────────────
+
+    def reset(self) -> ProbeObservation:  # type: ignore[override]
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(self.async_reset())
+        # Called from inside a running loop (e.g. pytest-asyncio) -- run in a
+        # fresh thread that has its own event loop.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, self.async_reset()).result()
+
+    def step(self, action: ProbeAction) -> ProbeObservation:  # type: ignore[override]
+        """
+        Sync step for openenv compatibility.
+        Returns only the Observation (reward is embedded in obs.reward).
+        Use async_step() for the full (obs, reward, done, info) tuple.
+        """
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            obs, _, _, _ = asyncio.run(self.async_step(action))
+            return obs
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            obs, _, _, _ = pool.submit(asyncio.run, self.async_step(action)).result()
+            return obs
+
+    @property
+    def state(self) -> State:  # type: ignore[override]
+        return State(episode_id=self._episode_id, step_count=self._step_count)
+
+    # ── Action handlers ───────────────────────────────────────────────────
+
+    def _handle_add_comment(self, action: ProbeAction) -> RewardType:
+        entry = {
+            "type": "comment",
+            "line": action.line_number,
+            "text": action.comment,
+            "severity": action.severity.value if action.severity else None,
+            "category": action.category.value if action.category else None,
+        }
+        self._ep["review_comments"].append(entry)
+
+        score, new_finds, breakdown = self._grader.score_comment(
+            line_number=action.line_number,
+            comment=action.comment,
+            already_found=self._ep["issues_found"],
+        )
+        self._ep["issues_found"].extend(new_finds)
+
+        clamped = round(max(-1.0, min(1.0, score)), 4)
+        if new_finds:
+            explanation = f"Identified issue(s): {new_finds}"
+        elif score < 0:
+            explanation = "False-positive comment — matched no known issue."
+        else:
+            explanation = "Comment recorded; no new issue matched."
+
+        # ── Causal unlock: check whether any newly found issue reveals context
+        self._unlock_causal_hints(new_finds)
+
+        return RewardType(
+            total=clamped,
+            components=breakdown,
+            passed=bool(new_finds),
+            explanation=explanation,
+            step=self._step_count,
+            terminal=False,
+        )
+
+    def _unlock_causal_hints(self, newly_found: list[str]) -> None:
+        """Append context hint text for any issue that has an 'unlocks' key."""
+        task = self._ep["task"]
+        hint_map: dict[str, str] = task.get("context_hints", {})
+        for issue in task["issues"]:
+            unlock_key = issue.get("unlocks")
+            if (
+                unlock_key
+                and issue["id"] in newly_found
+                and unlock_key not in self._ep["hints_unlocked"]
+                and unlock_key in hint_map
+            ):
+                self._ep["hints_unlocked"].add(unlock_key)
+                self._ep["context_hints"].append(hint_map[unlock_key])
+
+    def _handle_get_context(
+        self, action: ProbeAction
+    ) -> RewardType:
+        """
+        GET_CONTEXT — reveal ±5 lines around the requested line number.
+
+        Costs a small step penalty (-0.01) to discourage random probing,
+        but rewards focused investigation (line near an actual issue: 0.0
+        net cost — penalty waived).
+        """
+        line_number = action.line_number
+        task = self._ep["task"]
+        code_lines = task["code"].split("\n")
+
+        if line_number is None:
+            return RewardType(
+                total=-0.02,
+                components={"invalid_context_probe": -0.02},
+                passed=False,
+                explanation="GET_CONTEXT requires a line_number.",
+                step=self._step_count,
+                terminal=False,
+            )
+
+        # Build snippet
+        start = max(0, line_number - 6)
+        end = min(len(code_lines), line_number + 5)
+        snippet_lines = [
+            f"{i + 1:3}: {code_lines[i]}" for i in range(start, end)
+        ]
+        snippet = "\n".join(snippet_lines)
+
+        # Check if probed line is near a real issue (within LINE_TOLERANCE).
+        near_issue = any(
+            (iss["line_range"][0] - LINE_TOLERANCE) <= line_number <= (iss["line_range"][1] + LINE_TOLERANCE)
+            for iss in task["issues"]
+        )
+        penalty = 0.0 if near_issue else -0.01
+
+        # Store the context result in review history so the agent can see it
+        self._ep["review_comments"].append({
+            "type": "context_probe",
+            "line": line_number,
+            "context": snippet,
+        })
+
+        return RewardType(
+            total=penalty,
+            components={"context_probe_penalty": penalty},
+            passed=near_issue,
+            explanation=(
+                f"Context around line {line_number}:\n{snippet}"
+            ),
+            step=self._step_count,
+            terminal=False,
+        )
+
+    def _handle_request_changes(self, action: ProbeAction) -> RewardType:
+        self._ep["review_decision"] = "request_changes"
+        self._ep["review_comments"].append(
+            {"type": "request_changes", "text": action.comment}
+        )
+        if self._ep["issues_found"]:
+            return RewardType(
+                total=0.05,
+                components={"decision_bonus": 0.05},
+                passed=True,
+                explanation="REQUEST_CHANGES after finding issues — correct.",
+                step=self._step_count,
+                terminal=False,
+            )
+        return RewardType(
+            total=-0.05,
+            components={"premature_decision_penalty": -0.05},
+            passed=False,
+            explanation="REQUEST_CHANGES with no issues found yet.",
+            step=self._step_count,
+            terminal=False,
+        )
+
+    def _handle_approve(self) -> RewardType:
+        self._ep["review_decision"] = "approve"
+        total_issues = len(self._ep["task"]["issues"])
+        found = len(set(self._ep["issues_found"]))
+        if total_issues > 0 and found < total_issues * 0.5:
+            return RewardType(
+                total=-0.15,
+                components={"bad_approval_penalty": -0.15},
+                passed=False,
+                explanation=f"APPROVE with only {found}/{total_issues} issues found.",
+                step=self._step_count,
+                terminal=False,
+            )
+        return RewardType(
+            total=0.02,
+            components={"approval_credit": 0.02},
+            passed=True,
+            explanation="APPROVE recorded.",
+            step=self._step_count,
+            terminal=False,
+        )
+
+    def _handle_submit_review(self) -> tuple[RewardType, bool]:
+        if self._ep.get("review_submitted"):
+            return (
+                RewardType(
+                    total=-0.05,
+                    components={"duplicate_submit_penalty": -0.05},
+                    passed=False,
+                    explanation="Review already submitted.",
+                    step=self._step_count,
+                    terminal=False,
+                ),
+                False,
+            )
+        self._ep["review_submitted"] = True
+        task = self._ep["task"]
+        reward_obj = self._grader.final_score(
+            issues_found=list(set(self._ep["issues_found"])),
+            review_decision=self._ep.get("review_decision"),
+            step_count=self._step_count,
+            max_steps=task["max_steps"],
+            current_step=self._step_count,
+        )
+        return reward_obj, True
+
+    # ── Observation builder ───────────────────────────────────────────────
+
+    def _make_obs(self, reward: float, done: bool) -> ProbeObservation:
+        task = self._ep["task"]
+        return ProbeObservation(
+            code_snippet=task["code"],
+            task_description=task["description"],
+            file_name=task["file_name"],
+            task_id=task["id"],
+            task_difficulty=task["difficulty"],
+            review_history=list(self._ep.get("review_comments", [])),
+            step_count=self._step_count,
+            max_steps=task["max_steps"],
+            issues_found_count=len(set(self._ep.get("issues_found", []))),
+            total_issues=len(task["issues"]),
+            done=done,
+            reward=round(max(-1.0, min(1.0, reward)), 4),
+            context_hints=list(self._ep.get("context_hints", [])),
+            metadata={
+                "cumulative_reward": self._ep.get("cumulative_reward", 0.0),
+                "review_decision": self._ep.get("review_decision"),
+                "episode_id": self._episode_id,
+                "mutation_seed": self._ep["task"].get("_mutation_seed"),
+            },
+        )

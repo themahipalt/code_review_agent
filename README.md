@@ -1,0 +1,248 @@
+---
+title: PRobe Environment
+emoji: 🔍
+colorFrom: blue
+colorTo: green
+sdk: docker
+pinned: false
+app_port: 8000
+base_path: /web
+tags:
+  - openenv
+  - code-review
+  - rl-training
+  - grpo
+  - world-modeling
+  - probe
+---
+
+# PRobe — Pull Request Investigation Environment
+
+> **OpenEnv Hackathon 2026 · Theme #3.1 — World Modeling (Professional Tasks)**
+
+> *An RL environment where agents learn to investigate code like a security researcher, not scan it like a linter.*
+
+PRobe is an RL training environment where an LLM learns to perform structured **pull-request code reviews** on real Python source files. The agent must identify bugs, security vulnerabilities, performance bottlenecks, and design issues — and submit a structured review with line-level comments.
+
+The name has three meanings that map directly to the environment's design:
+- **PR** — the domain: pull-request review
+- **Probe** — the `get_context` action where the agent literally probes lines for deeper context
+- **World Modeling** — an agent that *investigates* a partially observable system, updating its beliefs as new evidence is revealed
+
+---
+
+## Problem Motivation
+
+LLMs can already *do* code review, but they do it inconsistently: they miss critical security bugs, produce noisy false positives, and fail to categorise issues by severity.  
+This environment provides a **reward signal** that directly measures review quality, enabling GRPO-style RL to close that gap in a measurable, repeatable way.
+
+---
+
+## Environment Design
+
+### Tasks (7 total)
+
+| ID | Difficulty | File | Issues | Domain |
+|----|-----------|------|--------|--------|
+| 0  | Ultra-easy | `bootstrap.py` | 2 | Off-by-one, hardcoded credential (hinted in comments) |
+| 1  | Easy       | `utils.py` | 3 | Logic bugs, off-by-one, dead code |
+| 2  | Medium     | `auth.py` | 5 | SQL injection, MD5, eval(), hardcoded creds |
+| 3  | Hard       | `data_pipeline.py` | 7 | N+1, SSL bypass, thread leak, OOM cache |
+| 4  | Medium     | `async_worker.py` | 5 | Race condition, missing await, resource leak |
+| 5  | Hard       | `api_server.py` | 6 | Command injection, path traversal, pickle RCE |
+| 6  | Hard       | `auth_service.py` | 6 | **Causal chain** — JWT forgery → privilege escalation |
+
+Tasks cycle automatically on each `reset()` call.
+
+### Observation
+
+```python
+{
+  "code_snippet":      str,    # Python source to review (mutated each episode)
+  "task_description":  str,    # What to look for
+  "file_name":         str,
+  "task_id":           int,    # 0–6
+  "task_difficulty":   str,    # ultra-easy / easy / medium / hard
+  "review_history":    list,   # actions taken so far this episode
+  "step_count":        int,
+  "max_steps":         int,
+  "issues_found_count": int,
+  "total_issues":      int,
+  "context_hints":     list,   # causal hints unlocked so far (Task 6)
+  "done":              bool,
+  "reward":            float,
+}
+```
+
+### Actions
+
+| action_type | Required fields | Effect |
+|-------------|----------------|--------|
+| `add_comment` | `line_number`, `comment`, `severity`, `category` | Annotate a line; reward if it matches a ground-truth issue |
+| `get_context` | `line_number` | Reveal ±5 lines of context around a line (free near issues, −0.01 elsewhere) |
+| `request_changes` | `comment` | Signal PR needs work |
+| `approve` | — | Approve PR (penalised if issues remain) |
+| `submit_review` | — | Finalise review; terminal reward |
+
+### Reward Function
+
+```
+Per-step (ADD_COMMENT):
+  + weight/total_weight × 0.60    per newly found issue (max 0.60 cumulative)
+  − 0.02                          per false-positive (substantive comment, no match)
+
+Terminal (SUBMIT_REVIEW):
+  + coverage × 0.20               weighted issue coverage bonus (max 0.20)
+  + 0.10 / −0.10                  correct / incorrect final decision
+  + efficiency × 0.10             step-efficiency bonus when coverage ≥ 60%
+
+Maximum achievable: ~1.0
+```
+
+Grading uses **keyword + line-range matching** (±2 lines tolerance) against hand-labelled ground-truth issues — no LLM judge needed, fully deterministic.
+
+---
+
+## Dynamic World Features (v3)
+
+### Code Mutation
+Every `reset()` applies three surface-level mutations so the agent must *read* code each episode rather than memorise tokens:
+
+| Mutation | Effect |
+|---|---|
+| Variable rename | One identifier swapped for a synonym (e.g. `total` → `acc`) |
+| Line shift | One blank line inserted above the first issue, shifting all `line_range` values by +1 |
+| Constant variance | One numeric literal nudged ±1 (e.g. `range(1000)` → `range(999)`) |
+
+Mutations are fully **deterministic** given the episode seed — reproducible but always fresh.
+
+### GET_CONTEXT Action
+The agent can spend a step probing any line to receive ±5 lines of surrounding context:
+
+```python
+action = ProbeAction(
+    action_type="get_context",
+    line_number=37,
+)
+# Observation will contain a context snippet around line 37
+# Cost: -0.01 if line is far from any real issue, 0.00 if near one
+```
+
+### Causal Unlock Chain (Task 6)
+Task 6 implements a **progressive world model**: finding certain issues unlocks new context hints that reveal deeper parts of the system:
+
+```
+Find hardcoded JWT secret
+        │
+        ▼
+  DB schema revealed ──► agent sees plaintext passwords + role table
+        │
+        ▼
+  Can now reason: leaked secret → forge admin token → privilege escalation
+
+Find missing rate-limit
+        │
+        ▼
+  nginx config revealed ──► confirms /auth fully exposed, no IP filtering
+```
+
+This rewards genuine *causal reasoning* — the agent must update its world model as new evidence arrives.
+
+---
+
+## Training
+
+### GRPO (single-turn format)
+
+For efficient LLM training the environment is also exposed in a **single-turn format**: the model receives the full code and must output a **JSON array** of all issues in one response. The same keyword-matching reward function scores the output.
+
+```python
+# Input prompt
+{"role": "system", "content": "You are an expert code reviewer. Output a JSON array of issues..."}
+{"role": "user",   "content": "File: auth.py\n```python\n...\n```\nProvide your review:"}
+
+# Expected output
+[{"line": 5, "category": "security", "severity": "critical",
+  "comment": "Hardcoded DB_PASSWORD should be loaded from environment variable"},
+ ...]
+```
+
+### Files
+
+| File | Purpose |
+|------|---------|
+| `train_grpo.py` | Standalone GRPO training script (TRL, full-precision or LoRA) |
+| `train_grpo_colab.ipynb` | Colab notebook — T4 GPU, Unsloth 4-bit, plots included |
+| `baseline.py` | GPT-4o-mini baseline for comparison |
+
+### Quick Start
+
+```bash
+# Run baseline
+export OPENAI_API_KEY=sk-...
+python baseline.py
+
+# Run reward smoke test (no GPU needed)
+python train_grpo.py --test
+
+# Train (requires GPU + trl>=0.12)
+pip install trl datasets accelerate unsloth
+python train_grpo.py
+```
+
+### Colab Training
+
+Open `train_grpo_colab.ipynb` in Google Colab (T4 runtime).  
+All install, training, evaluation, and plotting cells are included.
+
+---
+
+## Results
+
+*(Fill in after training run)*
+
+| Model | Avg Reward | Task-0 | Task-1 | Task-2 | Task-3 | Task-4 | Task-5 | Task-6 |
+|-------|-----------|--------|--------|--------|--------|--------|--------|--------|
+| GPT-4o-mini (baseline) | — | — | — | — | — | — | — | — |
+| Qwen2.5-1.5B (untrained) | — | — | — | — | — | — | — | — |
+| Qwen2.5-1.5B (GRPO 3 epochs) | — | — | — | — | — | — | — | — |
+
+Training curves: `training_curves.png` · Per-task rewards: `per_task_reward.png`
+
+---
+
+## Project Structure
+
+```
+PRobe/
+├── openenv.yaml                    # OpenEnv manifest
+├── pyproject.toml
+├── models.py                       # Action + Observation types
+├── client.py                       # OpenEnv client
+├── server/
+│   ├── app.py                      # FastAPI server
+│   ├── PRobe_environment.py        # Environment core
+│   ├── grader.py                   # Deterministic reward grader
+│   ├── mutator.py                  # Code mutation engine (dynamic world)
+│   ├── tasks.py                    # 7 ground-truth tasks
+│   └── Dockerfile
+├── tests/
+│   ├── test_grader.py              # 24 grader tests (all 5 RL attacks)
+│   └── test_dynamic_world.py       # 26 dynamic world tests
+train_grpo.py                       # GRPO training script
+train_grpo_colab.ipynb              # Colab notebook
+baseline.py                         # GPT-4o-mini baseline
+```
+
+---
+
+## API
+
+The environment server exposes standard OpenEnv HTTP + WebSocket endpoints:
+
+- `POST /reset` — start a new episode
+- `POST /step` — execute an action
+- `GET  /state` — current episode state
+- `WS   /ws` — persistent low-latency session
+- `GET  /web` — interactive web UI
+- `GET  /docs` — Swagger / OpenAPI docs
