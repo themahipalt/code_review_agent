@@ -1,0 +1,77 @@
+"""CodeReviewAgent Environment Client."""
+
+from typing import Dict
+
+from openenv.core import EnvClient
+from openenv.core.client_types import StepResult
+from openenv.core.env_server.types import State
+
+from .models import CodereviewagentAction, CodereviewagentObservation
+
+
+class CodereviewagentEnv(
+    EnvClient[CodereviewagentAction, CodereviewagentObservation, State]
+):
+    """
+    Client for the CodeReviewAgent environment.
+
+    Maintains a persistent WebSocket connection to the server.
+
+    Example:
+        >>> with CodereviewagentEnv(base_url="http://localhost:8000") as env:
+        ...     result = env.reset()
+        ...     print(result.observation.task_description)
+        ...
+        ...     action = CodereviewagentAction(
+        ...         action_type="add_comment",
+        ...         line_number=4,
+        ...         comment="Off-by-one: range(len+1) causes IndexError",
+        ...         severity="error",
+        ...         category="bug",
+        ...     )
+        ...     result = env.step(action)
+        ...     print(result.reward)
+    """
+
+    def _step_payload(self, action: CodereviewagentAction) -> Dict:
+        payload = {"action_type": action.action_type.value}
+        if action.line_number is not None:
+            payload["line_number"] = action.line_number
+        if action.comment is not None:
+            payload["comment"] = action.comment
+        if action.severity is not None:
+            payload["severity"] = action.severity.value
+        if action.category is not None:
+            payload["category"] = action.category.value
+        return payload
+
+    def _parse_result(
+        self, payload: Dict
+    ) -> StepResult[CodereviewagentObservation]:
+        obs_data = payload.get("observation", {})
+        observation = CodereviewagentObservation(
+            code_snippet=obs_data.get("code_snippet", ""),
+            task_description=obs_data.get("task_description", ""),
+            file_name=obs_data.get("file_name", ""),
+            task_id=obs_data.get("task_id", 0),
+            task_difficulty=obs_data.get("task_difficulty", "easy"),
+            review_history=obs_data.get("review_history", []),
+            step_count=obs_data.get("step_count", 0),
+            max_steps=obs_data.get("max_steps", 20),
+            issues_found_count=obs_data.get("issues_found_count", 0),
+            total_issues=obs_data.get("total_issues", 0),
+            done=payload.get("done", False),
+            reward=payload.get("reward"),
+            metadata=obs_data.get("metadata", {}),
+        )
+        return StepResult(
+            observation=observation,
+            reward=payload.get("reward"),
+            done=payload.get("done", False),
+        )
+
+    def _parse_state(self, payload: Dict) -> State:
+        return State(
+            episode_id=payload.get("episode_id"),
+            step_count=payload.get("step_count", 0),
+        )
