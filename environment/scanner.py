@@ -199,7 +199,9 @@ def _build_false_positive_findings(
     candidate_lines = [
         line_num for line_num in range(1, total_code_lines + 1)
         if line_num not in real_issue_lines
-    ] or list(range(1, total_code_lines + 1))  # fallback if every line is an issue line
+    # If every line belongs to a real issue (tiny synthetic tasks), fall back to
+    # the full line range so rng.choice always has candidates to pick from.
+    ] or list(range(1, total_code_lines + 1))
 
     findings: list[dict[str, Any]] = []
     for _ in range(false_positive_count):
@@ -268,7 +270,10 @@ def _build_issue_message(issue: dict[str, Any]) -> str:
     description_prefix = " ".join(issue.get("description", "").split()[:6])
     suffix_prefix = f"{description_prefix} - " if description_prefix else ""
 
-    # Deterministic per-issue RNG so the same issue always maps to the same suffix.
+    # Use a separate RNG seeded on the issue id so this issue always maps to
+    # the same scanner message regardless of evaluation order or FP count.
+    # Using the main rng here would make messages shift whenever recall draws
+    # change, which breaks the reproducibility guarantee.
     issue_rng = random.Random(hash(issue.get("id", "")) & 0xFFFF)
     return suffix_prefix + issue_rng.choice(message_pool)
 

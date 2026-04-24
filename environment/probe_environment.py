@@ -242,6 +242,8 @@ class ProbeEnvironment(Environment):
     # ── Action handlers ───────────────────────────────────────────────────
 
     def _handle_add_comment(self, action: ProbeAction) -> RewardType:
+        # Use getattr rather than action.classification directly because older
+        # serialised actions from GRPO rollout workers may omit the field.
         classification_val = getattr(action, "classification", None)
         classification_str = classification_val.value if classification_val else None
         entry = {
@@ -328,6 +330,9 @@ class ProbeEnvironment(Environment):
                 terminal=False,
             )
 
+        # Build an 11-line window: 5 lines before the target, the target itself,
+        # and 5 lines after.  The asymmetric offsets (-6 / +5) account for
+        # Python's 0-based list indexing against 1-based line numbers.
         window_start = max(0, requested_line - 6)
         window_end = min(len(code_lines), requested_line + 5)
         context_snippet = "\n".join(
@@ -373,6 +378,9 @@ class ProbeEnvironment(Environment):
         call ``ADD_COMMENT`` to earn reward from any finding.
         """
         task = self._episode.task
+        # _mutation_seed is injected by mutate_task() on reset; fall back to
+        # reset_count so the scanner seed is always defined even on the very
+        # first episode before any mutation has occurred.
         episode_seed = task.get("_mutation_seed", self._reset_count)
         is_first_scan = not self._episode.scanner_used
         self._episode.scanner_used = True
@@ -430,6 +438,8 @@ class ProbeEnvironment(Environment):
         total_issue_count = len(self._episode.task["issues"])
         found_issue_count = len(set(self._episode.issues_found))
         coverage_fraction = found_issue_count / total_issue_count if total_issue_count > 0 else 0.0
+        # Approving a PR while fewer than 50 % of issues are found is treated
+        # as reckless sign-off — a hard penalisation rather than a gentle nudge.
         if coverage_fraction < 0.5:
             return RewardType(
                 total=-0.15,
@@ -463,6 +473,8 @@ class ProbeEnvironment(Environment):
             )
         self._episode.review_submitted = True
         task = self._episode.task
+        # Deduplicate before scoring: the agent may have re-commented on the
+        # same line in multiple steps, but each issue should only count once.
         unique_issues_found = list(set(self._episode.issues_found))
         terminal_reward = self._grader.final_score(
             issues_found=unique_issues_found,

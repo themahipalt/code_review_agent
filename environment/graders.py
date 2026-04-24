@@ -61,6 +61,9 @@ class CodeReviewGrader:
 
     def __init__(self, task: dict[str, Any]) -> None:
         self._task = task
+        # Precompute once at construction — this value is read on every
+        # ADD_COMMENT call, and a GRPO training run may invoke score_comment
+        # thousands of times across rollout workers.
         self._total_weight: float = sum(iss["weight"] for iss in task["issues"])
 
     @property
@@ -118,6 +121,9 @@ class CodeReviewGrader:
                     given_classification=classification,
                 )
 
+        # Only substantive comments that match nothing earn the FP penalty.
+        # Very short comments (e.g. one-word probes) are exempt so the agent
+        # is not punished for exploratory low-effort queries.
         false_positive_penalty: float = (
             FALSE_POSITIVE_PENALTY if (not newly_found_ids and is_substantive) else 0.0
         )
@@ -139,6 +145,8 @@ class CodeReviewGrader:
         expected = issue.get("classification")
         if not expected:
             return 0.0
+        # Normalize both separator styles — training data may produce either
+        # "accidental-bug" (hyphenated) or "accidental_bug" (underscored).
         normalised = (given_classification or "").lower().replace("-", "_")
         if normalised == expected.lower().replace("-", "_"):
             return (issue["weight"] / self._total_weight) * CLASSIFICATION_POOL
@@ -187,6 +195,9 @@ class CodeReviewGrader:
                 "decision_score": round(decision_score, 4),
                 "efficiency_bonus": efficiency_bonus,
             },
+            # passed=True only when both conditions hold: the agent chose the
+            # correct terminal action AND covered enough issues to prove it
+            # actually read the code (prevents lucky-guess escalations).
             passed=is_correct and weighted_coverage >= COVERAGE_THRESHOLD,
             explanation=explanation,
             step=steps_used,

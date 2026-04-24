@@ -95,6 +95,8 @@ def _apply_variable_rename(
     Also updates each issue's keyword list so the grader continues to match
     after the rename.
     """
+    # \b word-boundary anchors prevent partial substitutions such as
+    # replacing 'data' inside 'database' or 'user' inside 'username'.
     renameable = [orig for orig in _IDENTIFIER_SYNONYMS if re.search(rf"\b{orig}\b", source_code)]
     if not renameable:
         return source_code, issues
@@ -128,6 +130,8 @@ def _apply_line_shift(
 
     first_issue_line = min(iss["line_range"][0] for iss in issues)
     # Convert 1-based line number to 0-based list index.
+    # first_issue_line is 1-based; subtract 2 to get the 0-based index of the
+    # line immediately above it (where the blank line will be inserted).
     insert_position = max(0, first_issue_line - 2)
 
     lines = source_code.split("\n")
@@ -149,6 +153,10 @@ def _apply_constant_variance(source_code: str, rng: random.Random) -> str:
     Numbers that appear only inside a comment on the same line are excluded to
     avoid corrupting annotated line references.
     """
+    # Match literals >= 2 only — nudging 0 or 1 could produce 0 or a negative
+    # value, breaking constructs like range(1) or timeout=1.
+    # The lookahead on comment text prevents shifting annotated line references
+    # that appear in inline comments (e.g. '# line 42').
     numeric_matches = [
         match
         for match in re.finditer(r"\b([2-9]|[1-9]\d+)\b", source_code)
