@@ -17,7 +17,7 @@ repo-root/
 
 ## Environment entry point
 
-`environment/app.py` — FastAPI app mounted at `/web`.  
+`environment/app.py` — FastAPI app mounted at `/ui/` (static frontend) and `/docs` (API).  
 `openenv.yaml` → `app: environment.app:app`.
 
 ## Reward function

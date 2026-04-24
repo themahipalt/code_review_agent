@@ -21,12 +21,15 @@ from __future__ import annotations
 
 import json
 import logging
+import pathlib
 from contextlib import asynccontextmanager
 from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 
 try:
     from openenv.core.env_server.http_server import create_app as _create_openenv_app
@@ -37,7 +40,7 @@ except Exception:  # pragma: no cover
 try:
     from ..agent.models import ProbeAction, ProbeObservation, RewardType
     from .probe_environment import ProbeEnvironment
-except ModuleNotFoundError:
+except (ImportError, ModuleNotFoundError):
     from agent.models import ProbeAction, ProbeObservation, RewardType  # type: ignore
     from environment.probe_environment import ProbeEnvironment  # type: ignore
 
@@ -85,12 +88,26 @@ class StepResponse:
 
 # ── App factory ───────────────────────────────────────────────────────────────
 
+# Resolve the frontend directory relative to this file so the app works
+# regardless of the working directory it is launched from.
+_FRONTEND_DIR = pathlib.Path(__file__).parent.parent / "frontend"
+
+
 def _build_app() -> FastAPI:
     application = FastAPI(
         title="PRobe",
         description="OpenEnv code-review environment — async FastAPI server.",
         version="2.0.0",
         lifespan=lifespan,
+    )
+
+    # Allow the frontend (served on the same host, any port) to call the API.
+    # In production, restrict allow_origins to the exact frontend URL.
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
     )
 
     # ── HTTP endpoints ────────────────────────────────────────────────────
@@ -175,18 +192,25 @@ def _build_app() -> FastAPI:
             pass
 
     # ── Web UI ────────────────────────────────────────────────────────────
-
+    # /web → redirect so old links still work
     @application.get("/web", response_class=HTMLResponse, include_in_schema=False)
-    async def web_ui() -> str:
-        return """
-        <!doctype html><html><head><title>PRobe</title></head>
-        <body style="font-family:sans-serif;padding:2rem">
-        <h2>PRobe Environment</h2>
-        <p>API docs: <a href="/docs">/docs</a></p>
-        <p>Health: <a href="/health">/health</a></p>
-        <p>Schema: <a href="/schema">/schema</a></p>
-        </body></html>
-        """
+    async def web_redirect() -> HTMLResponse:
+        return HTMLResponse(
+            '<meta http-equiv="refresh" content="0;url=/ui/">',
+            status_code=200,
+        )
+
+    # Mount the compiled frontend as a static site at /ui.
+    # Falls back gracefully if the frontend directory has not been built yet.
+    if _FRONTEND_DIR.is_dir():
+        application.mount("/ui", StaticFiles(directory=str(_FRONTEND_DIR), html=True), name="ui")
+        log.info("Frontend mounted at /ui from %s", _FRONTEND_DIR)
+    else:
+        log.warning(
+            "Frontend directory not found at %s — /ui will not be available. "
+            "Run the frontend build or create the 'frontend/' directory.",
+            _FRONTEND_DIR,
+        )
 
     return application
 

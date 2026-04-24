@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PRobe — AI Code Review Training Environment</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <!-- ══════════════════════════════════════════════════════════
+       TOP BAR
+  ══════════════════════════════════════════════════════════ -->
+  <header class="topbar">
+    <div class="topbar-left">
+      <span class="logo">&#x1F50D; PRobe</span>
+      <span class="tagline">Adversarial Code Review — RL Training Environment</span>
+    </div>
+    <div class="topbar-right">
+      <span class="badge" id="conn-badge">⚫ Disconnected</span>
+      <button id="btn-connect" class="btn btn-primary">Connect</button>
+      <button id="btn-reset"   class="btn btn-secondary" disabled>New Episode</button>
+    </div>
+  </header>
+
+  <!-- ══════════════════════════════════════════════════════════
+       MAIN LAYOUT — three columns
+  ══════════════════════════════════════════════════════════ -->
+  <main class="layout">
+
+    <!-- ── LEFT: Task meta + code viewer ─────────────────────── -->
+    <section class="panel panel-code">
+
+      <div class="panel-header">
+        <span id="task-label">Task —</span>
+        <span class="difficulty-badge" id="difficulty-badge">—</span>
+        <span class="steps-counter" id="steps-counter">Step 0 / —</span>
+      </div>
+
+      <p class="task-desc" id="task-desc">Connect and start an episode to begin.</p>
+
+      <div class="adversarial-hint" id="adv-hint" style="display:none"></div>
+
+      <!-- Code block with line-number highlights -->
+      <div class="code-wrapper">
+        <pre id="code-block" class="code-block"><span class="placeholder-text">No code loaded.</span></pre>
+      </div>
+
+      <!-- Context hints revealed by finding key issues -->
+      <div id="hints-container" style="display:none">
+        <div class="section-title">🔓 Unlocked Context Hints</div>
+        <div id="hints-list" class="hints-list"></div>
+      </div>
+
+    </section>
+
+    <!-- ── CENTRE: Action panel ───────────────────────────────── -->
+    <section class="panel panel-action">
+
+      <div class="panel-header">Actions</div>
+
+      <!-- ADD_COMMENT form -->
+      <div class="action-card" id="card-comment">
+        <div class="action-title">💬 Add Comment</div>
+        <div class="form-row">
+          <label>Line</label>
+          <input type="number" id="inp-line" min="1" placeholder="e.g. 12" />
+        </div>
+        <div class="form-row">
+          <label>Comment</label>
+          <textarea id="inp-comment" rows="3" placeholder="Describe the issue in detail…"></textarea>
+        </div>
+        <div class="form-row">
+          <label>Severity</label>
+          <select id="inp-severity">
+            <option value="">— none —</option>
+            <option value="info">info</option>
+            <option value="warning">warning</option>
+            <option value="error">error</option>
+            <option value="critical">critical</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <label>Category</label>
+          <select id="inp-category">
+            <option value="">— none —</option>
+            <option value="bug">bug</option>
+            <option value="security">security</option>
+            <option value="performance">performance</option>
+            <option value="style">style</option>
+            <option value="design">design</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <label>Classification</label>
+          <select id="inp-classification">
+            <option value="">— none —</option>
+            <option value="accidental_bug">accidental_bug</option>
+            <option value="intentional_backdoor">intentional_backdoor</option>
+          </select>
+        </div>
+        <button class="btn btn-action" id="btn-comment" disabled>Submit Comment</button>
+      </div>
+
+      <!-- Quick actions -->
+      <div class="quick-actions">
+        <div class="action-title">⚡ Quick Actions</div>
+
+        <div class="form-row">
+          <label>Probe Line</label>
+          <input type="number" id="inp-probe-line" min="1" placeholder="e.g. 8" />
+        </div>
+        <button class="btn btn-action btn-info" id="btn-get-context" disabled>🔍 Get Context</button>
+        <button class="btn btn-action btn-info" id="btn-run-scanner"  disabled>🤖 Run Scanner</button>
+
+        <div class="separator"></div>
+
+        <button class="btn btn-action btn-warn"    id="btn-request-changes" disabled>🔄 Request Changes</button>
+        <button class="btn btn-action btn-success" id="btn-approve"         disabled>✅ Approve PR</button>
+        <button class="btn btn-action btn-danger"  id="btn-submit"          disabled>📤 Submit Review</button>
+        <button class="btn btn-action btn-escalate" id="btn-escalate"       disabled>🚨 Escalate to Security</button>
+      </div>
+
+    </section>
+
+    <!-- ── RIGHT: Reward dashboard + history ─────────────────── -->
+    <section class="panel panel-reward">
+
+      <div class="panel-header">Reward Dashboard</div>
+
+      <!-- Cumulative reward ring -->
+      <div class="reward-ring-wrap">
+        <svg class="reward-ring" viewBox="0 0 120 120">
+          <circle class="ring-bg"    cx="60" cy="60" r="50" />
+          <circle class="ring-track" cx="60" cy="60" r="50" id="ring-track" />
+        </svg>
+        <div class="ring-label">
+          <span id="ring-value">0.00</span>
+          <small>cumulative</small>
+        </div>
+      </div>
+
+      <!-- Per-step component bars -->
+      <div class="component-bars" id="component-bars">
+        <div class="section-title">Last Step Breakdown</div>
+        <div class="bar-row" id="bar-row-issue_credit">
+          <span class="bar-label">Issue credit</span>
+          <div class="bar-track"><div class="bar-fill positive" id="bar-issue_credit"></div></div>
+          <span class="bar-val" id="val-issue_credit">0.00</span>
+        </div>
+        <div class="bar-row" id="bar-row-classification_credit">
+          <span class="bar-label">Classification</span>
+          <div class="bar-track"><div class="bar-fill positive" id="bar-classification_credit"></div></div>
+          <span class="bar-val" id="val-classification_credit">0.00</span>
+        </div>
+        <div class="bar-row" id="bar-row-false_positive_penalty">
+          <span class="bar-label">FP penalty</span>
+          <div class="bar-track"><div class="bar-fill negative" id="bar-false_positive_penalty"></div></div>
+          <span class="bar-val" id="val-false_positive_penalty">0.00</span>
+        </div>
+        <div class="bar-row" id="bar-row-coverage_bonus">
+          <span class="bar-label">Coverage</span>
+          <div class="bar-track"><div class="bar-fill positive" id="bar-coverage_bonus"></div></div>
+          <span class="bar-val" id="val-coverage_bonus">0.00</span>
+        </div>
+        <div class="bar-row" id="bar-row-decision_score">
+          <span class="bar-label">Decision</span>
+          <div class="bar-track"><div class="bar-fill neutral" id="bar-decision_score"></div></div>
+          <span class="bar-val" id="val-decision_score">0.00</span>
+        </div>
+        <div class="bar-row" id="bar-row-efficiency_bonus">
+          <span class="bar-label">Efficiency</span>
+          <div class="bar-track"><div class="bar-fill positive" id="bar-efficiency_bonus"></div></div>
+          <span class="bar-val" id="val-efficiency_bonus">0.00</span>
+        </div>
+      </div>
+
+      <!-- Issues progress -->
+      <div class="section-title" style="margin-top:1rem">Issues Found</div>
+      <div class="issues-progress">
+        <div class="issues-bar-wrap">
+          <div class="issues-bar-fill" id="issues-bar-fill"></div>
+        </div>
+        <span id="issues-found-label">0 / 0</span>
+      </div>
+
+      <!-- Step-by-step history feed -->
+      <div class="section-title" style="margin-top:1rem">Episode History</div>
+      <div class="history-feed" id="history-feed">
+        <div class="history-empty">No actions yet.</div>
+      </div>
+
+    </section>
+
+  </main>
+
+  <!-- ══════════════════════════════════════════════════════════
+       EPISODE-END MODAL
+  ══════════════════════════════════════════════════════════ -->
+  <div id="modal-overlay" class="modal-overlay" style="display:none">
+    <div class="modal">
+      <div class="modal-icon" id="modal-icon">🏁</div>
+      <h2 id="modal-title">Episode Complete</h2>
+      <p  id="modal-body">—</p>
+      <div class="modal-stats" id="modal-stats"></div>
+      <button class="btn btn-primary" id="modal-close">Start New Episode</button>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
