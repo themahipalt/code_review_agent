@@ -36,7 +36,7 @@ from openenv.core.env_server.interfaces import Environment
 from openenv.core.env_server.types import State
 
 try:
-    from ..models import ActionType, ProbeAction, ProbeObservation, RewardType
+    from ..agent.models import ActionType, ProbeAction, ProbeObservation, RewardType
     from ._import_compat import (
         CodeReviewGrader,
         EpisodeMemory,
@@ -46,8 +46,8 @@ try:
         run_scanner,
     )
 except ImportError:
-    from models import ActionType, ProbeAction, ProbeObservation, RewardType  # type: ignore[no-redef]
-    from server._import_compat import (  # type: ignore[no-redef]
+    from agent.models import ActionType, ProbeAction, ProbeObservation, RewardType  # type: ignore[no-redef]
+    from environment._import_compat import (  # type: ignore[no-redef]
         CodeReviewGrader,
         EpisodeMemory,
         LINE_TOLERANCE,

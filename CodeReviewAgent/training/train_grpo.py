@@ -57,8 +57,8 @@ from typing import Any
 # ---------------------------------------------------------------------------
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
-from server.tasks import TASKS
-from server.grader import (
+from environment.tasks import TASKS
+from environment.graders import (
     CodeReviewGrader,
     ISSUE_REWARD_POOL,
     CLASSIFICATION_POOL,
@@ -69,7 +69,7 @@ from server.grader import (
     FORMAT_BONUS,
     LINE_TOLERANCE,
 )
-from server.mutator import mutate_task
+from environment.mutator import mutate_task
 
 # ---------------------------------------------------------------------------
 # Optional heavy imports — degrade gracefully so --test works without GPU

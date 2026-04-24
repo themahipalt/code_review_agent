@@ -22,11 +22,11 @@ import pathlib
 import random
 import sys
 
-sys.path.insert(0, str(pathlib.Path(__file__).parent))
+sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 
-from server.tasks import TASKS
-from server.mutator import mutate_task
-from train_grpo import compute_reward
+from environment.tasks import TASKS
+from environment.mutator import mutate_task
+from training.train_grpo import compute_reward
 
 try:
     import matplotlib

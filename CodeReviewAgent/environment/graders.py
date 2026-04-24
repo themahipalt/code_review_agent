@@ -27,9 +27,9 @@ from __future__ import annotations
 from typing import Any
 
 try:
-    from ..models import RewardType
+    from ..agent.models import RewardType
 except ImportError:
-    from models import RewardType  # type: ignore[no-redef]
+    from agent.models import RewardType  # type: ignore[no-redef]
 
 # -- Grading hyper-parameters ------------------------------------------------
 LINE_TOLERANCE: int = 2         # lines either side of an issue's declared range

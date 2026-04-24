@@ -32,12 +32,12 @@ dev = [
 
 [project.scripts]
 # Server entry point - enables running via: uv run --project . server
-server = "PRobe.server.app:main"
+server = "environment.app:main"
 
 [tool.setuptools]
 include-package-data = true
-packages = ["PRobe", "PRobe.server"]
-package-dir = { "PRobe" = ".", "PRobe.server" = "server" }
+packages = ["agent", "environment", "training"]
+package-dir = { "" = "." }
 
 [dependency-groups]
 dev = [

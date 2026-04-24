@@ -34,14 +34,14 @@ import pytest
 # Ensure the project root (containing the `server` package) is on the path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from server.grader import (
+from environment.graders import (
     CodeReviewGrader,
     LINE_TOLERANCE,
     ISSUE_REWARD_POOL,
     COVERAGE_POOL,
     DECISION_REWARD,
 )
-from server.tasks import TASKS
+from environment.tasks import TASKS
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────

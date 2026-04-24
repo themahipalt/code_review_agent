@@ -35,11 +35,11 @@ except Exception:  # pragma: no cover
     _OPENENV_AVAILABLE = False
 
 try:
-    from ..models import ProbeAction, ProbeObservation, RewardType
+    from ..agent.models import ProbeAction, ProbeObservation, RewardType
     from .probe_environment import ProbeEnvironment
 except ModuleNotFoundError:
-    from models import ProbeAction, ProbeObservation, RewardType  # type: ignore
-    from server.probe_environment import ProbeEnvironment  # type: ignore
+    from agent.models import ProbeAction, ProbeObservation, RewardType  # type: ignore
+    from environment.probe_environment import ProbeEnvironment  # type: ignore
 
 log = logging.getLogger(__name__)
 

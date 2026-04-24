@@ -17,10 +17,10 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from server.mutator import mutate_task
-from server.probe_environment import EpisodeState
-from server.tasks import TASKS
-from server.grader import CodeReviewGrader
+from environment.mutator import mutate_task
+from environment.probe_environment import EpisodeState
+from environment.tasks import TASKS
+from environment.graders import CodeReviewGrader
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -160,16 +160,16 @@ class TestCausalUnlock:
         """Return a fresh environment instance fast-forwarded to task 6."""
         import asyncio
         try:
-            from server.probe_environment import ProbeEnvironment
+            from environment.probe_environment import ProbeEnvironment
         except ImportError:
             from probe_environment import ProbeEnvironment  # type: ignore
 
         env = ProbeEnvironment()
         # force-set episode to task 6 (bypass cycling for test speed)
-        from server.mutator import mutate_task as _mt
-        from server.probe_environment import EpisodeState
+        from environment.mutator import mutate_task as _mt
+        from environment.probe_environment import EpisodeState
         task = _mt(TASK6, seed=0)
-        from server.grader import CodeReviewGrader as _G
+        from environment.graders import CodeReviewGrader as _G
         env._grader = _G(task)
         env._episode = EpisodeState(task=task)
         return env
@@ -285,11 +285,11 @@ class TestGetContext:
 
     def _make_env(self):
         try:
-            from server.probe_environment import ProbeEnvironment
+            from environment.probe_environment import ProbeEnvironment
         except ImportError:
             from probe_environment import ProbeEnvironment  # type: ignore
-        from server.mutator import mutate_task as _mt
-        from server.grader import CodeReviewGrader as _G
+        from environment.mutator import mutate_task as _mt
+        from environment.graders import CodeReviewGrader as _G
         env = ProbeEnvironment()
         task = _mt(TASKS[1], seed=0)
         env._grader = _G(task)
@@ -360,12 +360,12 @@ class TestTask3CausalUnlocks:
 
     def _make_env(self):
         try:
-            from server.probe_environment import ProbeEnvironment
+            from environment.probe_environment import ProbeEnvironment
         except ImportError:
             from probe_environment import ProbeEnvironment  # type: ignore
         env = ProbeEnvironment()
         task = copy.deepcopy(self.TASK3)
-        from server.grader import CodeReviewGrader as _G
+        from environment.graders import CodeReviewGrader as _G
         env._grader = _G(task)
         env._episode = EpisodeState(task=task)
         return env
@@ -443,12 +443,12 @@ class TestTask5CausalUnlocks:
 
     def _make_env(self):
         try:
-            from server.probe_environment import ProbeEnvironment
+            from environment.probe_environment import ProbeEnvironment
         except ImportError:
             from probe_environment import ProbeEnvironment  # type: ignore
         env = ProbeEnvironment()
         task = copy.deepcopy(self.TASK5)
-        from server.grader import CodeReviewGrader as _G
+        from environment.graders import CodeReviewGrader as _G
         env._grader = _G(task)
         env._episode = EpisodeState(task=task)
         return env
@@ -510,7 +510,7 @@ class TestEpisodeMemory:
     """Cross-episode memory — records findings and injects prior hints."""
 
     def _fresh_memory(self, tmp_path):
-        from server.episode_memory import EpisodeMemory
+        from environment.episode_memory import EpisodeMemory
         return EpisodeMemory(memory_dir=str(tmp_path), instance_id="test")
 
     def test_empty_memory_returns_no_hint(self, tmp_path):
@@ -584,7 +584,7 @@ class TestEpisodeMemory:
     def test_env_injects_prior_hint_on_second_reset(self, tmp_path):
         """After a full episode, the next reset for the same task_id must inject a hint."""
         try:
-            from server.probe_environment import ProbeEnvironment
+            from environment.probe_environment import ProbeEnvironment
         except ImportError:
             from probe_environment import ProbeEnvironment  # type: ignore
         import asyncio
@@ -610,11 +610,11 @@ class TestEpisodeMemory:
     def test_env_records_memory_after_submit(self, tmp_path):
         """Submitting a review with findings must persist them in EpisodeMemory."""
         try:
-            from server.probe_environment import ProbeEnvironment
+            from environment.probe_environment import ProbeEnvironment
         except ImportError:
             from probe_environment import ProbeEnvironment  # type: ignore
         import asyncio
-        from models import ProbeAction, ActionType
+        from agent.models import ProbeAction, ActionType
 
         env = ProbeEnvironment(memory_dir=str(tmp_path))
         asyncio.run(env.async_reset())   # task 0
@@ -633,7 +633,7 @@ class TestEpisodeMemory:
         asyncio.run(env.async_step(add_action))
 
         # Submit review
-        from models import ActionType as AT
+        from agent.models import ActionType as AT
         submit_action = ProbeAction(
             action_type=AT.SUBMIT_REVIEW,
             line_number=None,
@@ -657,14 +657,14 @@ class TestRunScanner:
 
     def _make_env(self, task_index: int = 1):
         try:
-            from server.probe_environment import ProbeEnvironment
+            from environment.probe_environment import ProbeEnvironment
         except ImportError:
             from probe_environment import ProbeEnvironment  # type: ignore
         env = ProbeEnvironment()
         import copy
         task = copy.deepcopy(TASKS[task_index])
-        from server.grader import CodeReviewGrader as _G
-        from server.mutator import mutate_task as _mt
+        from environment.graders import CodeReviewGrader as _G
+        from environment.mutator import mutate_task as _mt
         task = _mt(task, seed=7)
         env._grader = _G(task)
         env._episode = EpisodeState(task=task)
@@ -674,7 +674,7 @@ class TestRunScanner:
 
     def test_scanner_returns_required_keys(self):
         """run_scanner must return dict with tool, findings, missed_count, note."""
-        from server.scanner import run_scanner
+        from environment.scanner import run_scanner
         result = run_scanner(TASKS[1], seed=0)
         assert "tool" in result
         assert "findings" in result
@@ -683,13 +683,13 @@ class TestRunScanner:
 
     def test_scanner_findings_are_list(self):
         """findings must be a list."""
-        from server.scanner import run_scanner
+        from environment.scanner import run_scanner
         result = run_scanner(TASKS[1], seed=0)
         assert isinstance(result["findings"], list)
 
     def test_scanner_finding_has_required_fields(self):
         """Every finding dict must have line, rule, message, category, severity, verified."""
-        from server.scanner import run_scanner
+        from environment.scanner import run_scanner
         result = run_scanner(TASKS[2], seed=42)
         for f in result["findings"]:
             for key in ("line", "rule", "message", "category", "severity", "verified"):
@@ -697,14 +697,14 @@ class TestRunScanner:
 
     def test_scanner_verified_always_false(self):
         """All scanner findings start unverified — agent must confirm them."""
-        from server.scanner import run_scanner
+        from environment.scanner import run_scanner
         result = run_scanner(TASKS[2], seed=99)
         for f in result["findings"]:
             assert f["verified"] is False
 
     def test_scanner_recall_below_100_percent(self):
         """With enough seeds, at least some issues must be missed (recall < 1.0)."""
-        from server.scanner import run_scanner
+        from environment.scanner import run_scanner
         total_issues = len(TASKS[2]["issues"])   # 5 issues in Task 2
         missed_any = any(
             run_scanner(TASKS[2], seed=s)["missed_count"] > 0
@@ -714,7 +714,7 @@ class TestRunScanner:
 
     def test_scanner_deterministic_per_seed(self):
         """Same seed must produce identical results."""
-        from server.scanner import run_scanner
+        from environment.scanner import run_scanner
         r1 = run_scanner(TASKS[3], seed=123)
         r2 = run_scanner(TASKS[3], seed=123)
         assert r1["findings"] == r2["findings"]
@@ -722,7 +722,7 @@ class TestRunScanner:
 
     def test_scanner_different_seeds_differ(self):
         """Different seeds should (almost always) produce different findings."""
-        from server.scanner import run_scanner
+        from environment.scanner import run_scanner
         results = {
             tuple(f["line"] for f in run_scanner(TASKS[3], seed=s)["findings"])
             for s in range(10)
@@ -731,7 +731,7 @@ class TestRunScanner:
 
     def test_scanner_line_numbers_within_code(self):
         """All reported line numbers must be within the code's line count."""
-        from server.scanner import run_scanner
+        from environment.scanner import run_scanner
         task = TASKS[2]
         total_lines = len(task["code"].split("\n"))
         result = run_scanner(task, seed=5)
@@ -742,7 +742,7 @@ class TestRunScanner:
 
     def test_scanner_tool_is_known_string(self):
         """tool field must be a non-empty string."""
-        from server.scanner import run_scanner
+        from environment.scanner import run_scanner
         result = run_scanner(TASKS[1], seed=0)
         assert isinstance(result["tool"], str)
         assert len(result["tool"]) > 0
@@ -804,10 +804,10 @@ class TestRunScanner:
         """RUN_SCANNER dispatched through async_step must return a valid reward."""
         import asyncio
         try:
-            from server.probe_environment import ProbeEnvironment
+            from environment.probe_environment import ProbeEnvironment
         except ImportError:
             from probe_environment import ProbeEnvironment  # type: ignore
-        from models import ProbeAction, ActionType
+        from agent.models import ProbeAction, ActionType
 
         env = ProbeEnvironment()
         asyncio.run(env.async_reset())
@@ -829,10 +829,10 @@ class TestRunScanner:
         """async_state must reflect scanner_used after the action fires."""
         import asyncio
         try:
-            from server.probe_environment import ProbeEnvironment
+            from environment.probe_environment import ProbeEnvironment
         except ImportError:
             from probe_environment import ProbeEnvironment  # type: ignore
-        from models import ProbeAction, ActionType
+        from agent.models import ProbeAction, ActionType
 
         env = ProbeEnvironment()
         asyncio.run(env.async_reset())

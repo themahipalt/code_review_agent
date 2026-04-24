@@ -11,4 +11,3 @@ from .episode_memory import EpisodeMemory
 from .scanner import run_scanner
 
 __all__ = ["EpisodeState", "EpisodeMemory", "ProbeEnvironment", "run_scanner"]
-__all__ = ["ProbeEnvironment"]

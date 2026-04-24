@@ -15,24 +15,24 @@ from __future__ import annotations
 
 # Relative imports (context 1 — installed package / pytest via pyproject.toml)
 try:
-    from .grader import CodeReviewGrader, FALSE_POSITIVE_PENALTY, LINE_TOLERANCE  # noqa: F401
+    from .graders import CodeReviewGrader, FALSE_POSITIVE_PENALTY, LINE_TOLERANCE  # noqa: F401
     from .mutator import mutate_task  # noqa: F401
     from .tasks import TASKS  # noqa: F401
     from .episode_memory import EpisodeMemory  # noqa: F401
     from .scanner import run_scanner  # noqa: F401
 
 except ImportError:
-    # Absolute imports (context 2 — python -m server.app)
+    # Absolute imports (context 2 — python -m environment.app)
     try:
-        from server.grader import (  # type: ignore[no-redef]
+        from environment.graders import (  # type: ignore[no-redef]
             CodeReviewGrader,
             FALSE_POSITIVE_PENALTY,
             LINE_TOLERANCE,
         )
-        from server.mutator import mutate_task  # type: ignore[no-redef]
-        from server.tasks import TASKS  # type: ignore[no-redef]
-        from server.episode_memory import EpisodeMemory  # type: ignore[no-redef]
-        from server.scanner import run_scanner  # type: ignore[no-redef]
+        from environment.mutator import mutate_task  # type: ignore[no-redef]
+        from environment.tasks import TASKS  # type: ignore[no-redef]
+        from environment.episode_memory import EpisodeMemory  # type: ignore[no-redef]
+        from environment.scanner import run_scanner  # type: ignore[no-redef]
 
     except ModuleNotFoundError:
         # Path-based loading (context 3 — bare script, ad-hoc test runner)

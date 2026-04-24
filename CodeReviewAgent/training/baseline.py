@@ -30,9 +30,9 @@ import time
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
-from server.tasks import TASKS
-from server.probe_environment import ProbeEnvironment
-from models import ActionType, IssueCategory, IssueClassification, ProbeAction, Severity
+from environment.tasks import TASKS
+from environment.probe_environment import ProbeEnvironment
+from agent.models import ActionType, IssueCategory, IssueClassification, ProbeAction, Severity
 
 try:
     import matplotlib
