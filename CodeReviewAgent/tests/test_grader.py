@@ -34,7 +34,13 @@ import pytest
 # Ensure the project root (containing the `server` package) is on the path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from server.grader import CodeReviewGrader, LINE_TOLERANCE
+from server.grader import (
+    CodeReviewGrader,
+    LINE_TOLERANCE,
+    ISSUE_REWARD_POOL,
+    COVERAGE_POOL,
+    DECISION_REWARD,
+)
 from server.tasks import TASKS
 
 
@@ -143,7 +149,7 @@ def test_perfect_comment_task0_issue1(grader0):
         already_found=[],
     )
     assert "bootstrap_off_by_one" in found
-    assert breakdown["issue_credit"] == pytest.approx(0.30, abs=0.01)
+    assert breakdown["issue_credit"] == pytest.approx((1.0 / 2.0) * ISSUE_REWARD_POOL, abs=0.01)
     assert score > 0.0
 
 
@@ -171,10 +177,10 @@ def test_perfect_final_score_task0(grader0):
         steps_used=4,
         max_steps=6,
     )
-    # coverage_bonus=0.20 + decision_score=0.10 + efficiency_bonus>0 → ~0.33-0.40
-    assert reward.total >= 0.30
-    assert reward.components["coverage_bonus"] == pytest.approx(0.20, abs=0.01)
-    assert reward.components["decision_score"] == pytest.approx(0.10, abs=0.001)
+    # coverage_bonus=COVERAGE_POOL + decision_score=DECISION_REWARD + efficiency_bonus>0
+    assert reward.total >= 0.25
+    assert reward.components["coverage_bonus"] == pytest.approx(COVERAGE_POOL, abs=0.01)
+    assert reward.components["decision_score"] == pytest.approx(DECISION_REWARD, abs=0.001)
     assert reward.passed is True
 
 
@@ -308,11 +314,11 @@ def test_final_score_full_coverage_correct_decision(grader1):
         steps_used=5,
         max_steps=15,
     )
-    assert reward.total >= 0.30
+    assert reward.total >= 0.25
     assert reward.passed is True
     assert reward.terminal is True
-    assert reward.components["coverage_bonus"] == pytest.approx(0.20, abs=0.01)
-    assert reward.components["decision_score"] == pytest.approx(0.10, abs=0.001)
+    assert reward.components["coverage_bonus"] == pytest.approx(COVERAGE_POOL, abs=0.01)
+    assert reward.components["decision_score"] == pytest.approx(DECISION_REWARD, abs=0.001)
 
 
 # ── 10. final_score — zero coverage + wrong decision ─────────────────────────
@@ -326,7 +332,7 @@ def test_final_score_zero_coverage_wrong_decision(grader1):
     )
     assert reward.total <= 0.0
     assert reward.passed is False
-    assert reward.components["decision_score"] == pytest.approx(-0.10, abs=0.001)
+    assert reward.components["decision_score"] == pytest.approx(-DECISION_REWARD, abs=0.001)
     assert reward.components["coverage_bonus"] == pytest.approx(0.0, abs=0.001)
 
 

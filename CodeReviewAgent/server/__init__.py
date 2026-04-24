@@ -6,7 +6,7 @@
 
 """PRobe environment server components."""
 
-from .CodeReviewAgent_environment import EpisodeState, ProbeEnvironment
+from .probe_environment import EpisodeState, ProbeEnvironment
 from .episode_memory import EpisodeMemory
 from .scanner import run_scanner
 

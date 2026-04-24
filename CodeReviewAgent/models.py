@@ -23,6 +23,7 @@ class ActionType(str, Enum):
     REQUEST_CHANGES = "request_changes"
     APPROVE = "approve"
     SUBMIT_REVIEW = "submit_review"
+    ESCALATE_TO_SECURITY_REVIEW = "escalate_to_security_review"  # adversarial tasks
 
 
 class Severity(str, Enum):
@@ -42,6 +43,13 @@ class IssueCategory(str, Enum):
     PERFORMANCE = "performance"
     STYLE = "style"
     DESIGN = "design"
+
+
+class IssueClassification(str, Enum):
+    """Whether an issue is an honest mistake or a deliberate backdoor."""
+
+    ACCIDENTAL_BUG = "accidental_bug"
+    INTENTIONAL_BACKDOOR = "intentional_backdoor"
 
 
 class RewardType(BaseModel):
@@ -91,6 +99,10 @@ class ProbeAction(Action):
     comment: str | None = Field(default=None, description="Review comment text")
     severity: Severity | None = Field(default=None, description="Issue severity level")
     category: IssueCategory | None = Field(default=None, description="Issue category")
+    classification: IssueClassification | None = Field(
+        default=None,
+        description="Whether this issue is an accidental_bug or intentional_backdoor",
+    )
 
 
 class ProbeObservation(Observation):
@@ -126,6 +138,10 @@ class ProbeObservation(Observation):
         description="Most recent step reward (mirrors RewardType.total)",
     )
     metadata: dict[str, Any] = Field(default_factory=dict, description="Extra episode metadata")
+    adversarial_hint: str = Field(
+        default="",
+        description="Contributor context hint for adversarial tasks (partial observability)",
+    )
 
 
 __all__ = [

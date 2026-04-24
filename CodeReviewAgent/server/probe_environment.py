@@ -1,5 +1,5 @@
 """
-CodeReviewAgent Environment — async-native implementation.
+PRobe Environment — async-native implementation.
 
 Episode lifecycle:
   1. reset()  → ObservationType              (starts a new episode)
@@ -70,6 +70,7 @@ class EpisodeState:
     task: dict[str, Any]
     review_comments: list[dict[str, Any]] = dataclasses.field(default_factory=list)
     issues_found: list[str] = dataclasses.field(default_factory=list)
+    correct_classifications: int = 0      # issues found WITH correct bug/backdoor label
     review_decision: str | None = None
     review_submitted: bool = False
     cumulative_reward: float = 0.0
@@ -148,6 +149,8 @@ class ProbeEnvironment(Environment):
             reward_obj = self._handle_approve()
         elif action.action_type == ActionType.SUBMIT_REVIEW:
             reward_obj, done = self._handle_submit_review()
+        elif action.action_type == ActionType.ESCALATE_TO_SECURITY_REVIEW:
+            reward_obj, done = self._handle_escalate(action)
         else:
             reward_obj = RewardType(
                 total=-0.05,
@@ -199,6 +202,8 @@ class ProbeEnvironment(Environment):
             "cumulative_reward": self._episode.cumulative_reward,
             "max_steps": task["max_steps"],
             "scanner_used": self._episode.scanner_used,
+            "correct_classifications": self._episode.correct_classifications,
+            "escalation_required": task.get("escalation_required", False),
         }
 
     # ── Sync wrappers (openenv / create_app compatibility) ────────────────
@@ -230,17 +235,22 @@ class ProbeEnvironment(Environment):
 
     @property
     def state(self) -> State:  # type: ignore[override]
+        # Sync property required by openenv's create_app interface.
+        # Full async snapshot is available via async_state().
         return State(episode_id=self._episode_id, step_count=self._step_count)
 
     # ── Action handlers ───────────────────────────────────────────────────
 
     def _handle_add_comment(self, action: ProbeAction) -> RewardType:
+        classification_val = getattr(action, "classification", None)
+        classification_str = classification_val.value if classification_val else None
         entry = {
             "type": "comment",
             "line": action.line_number,
             "text": action.comment,
             "severity": action.severity.value if action.severity else None,
             "category": action.category.value if action.category else None,
+            "classification": classification_str,
         }
         self._episode.review_comments.append(entry)
 
@@ -248,8 +258,17 @@ class ProbeEnvironment(Environment):
             line_number=action.line_number,
             comment=action.comment,
             already_found=self._episode.issues_found,
+            classification=classification_str,
         )
         self._episode.issues_found.extend(new_finds)
+
+        # Track correct classifications for metrics logging
+        if new_finds and classification_str:
+            task_issues = {iss["id"]: iss for iss in self._episode.task["issues"]}
+            for fid in new_finds:
+                expected = task_issues.get(fid, {}).get("classification")
+                if expected and classification_str.lower().replace("-", "_") == expected.lower().replace("-", "_"):
+                    self._episode.correct_classifications += 1
 
         clamped = round(max(-1.0, min(1.0, score)), 4)
         if new_finds:
@@ -470,10 +489,49 @@ class ProbeEnvironment(Environment):
             )
         return reward_obj, True
 
-    # ── Observation builder ───────────────────────────────────────────────
+    def _handle_escalate(self, action: ProbeAction) -> tuple[RewardType, bool]:
+        """
+        ESCALATE_TO_SECURITY_REVIEW — terminal action for adversarial tasks.
+
+        Correct only when the task has escalation_required=True.
+        Calling on a non-adversarial task incurs a false-alarm penalty.
+        """
+        if self._episode.review_submitted:
+            return (
+                RewardType(
+                    total=-0.05,
+                    components={"duplicate_submit_penalty": -0.05},
+                    passed=False,
+                    explanation="Review already submitted.",
+                    step=self._step_count,
+                    terminal=False,
+                ),
+                False,
+            )
+        self._episode.review_submitted = True
+        self._episode.review_decision = "escalate_to_security_review"
+        task = self._episode.task
+        unique_issues_found = list(set(self._episode.issues_found))
+        reward_obj = self._grader.final_score(
+            issues_found=unique_issues_found,
+            review_decision="escalate_to_security_review",
+            steps_used=self._step_count,
+            max_steps=task["max_steps"],
+        )
+        if unique_issues_found:
+            self._memory.record(task["id"], unique_issues_found)
+        return reward_obj, True
 
     def _build_observation(self, reward: float, done: bool) -> ProbeObservation:
         task = self._episode.task
+        # Adversarial tasks hint that the PR is from an external contributor;
+        # non-adversarial tasks hint it is from a trusted team member.
+        # Neither phrasing reveals whether backdoors are present (partial observability).
+        adversarial_hint = (
+            "This PR was submitted by an external contributor with no prior commit history."
+            if task.get("escalation_required")
+            else "This PR was submitted by a trusted team member."
+        )
         return ProbeObservation(
             code_snippet=task["code"],
             task_description=task["description"],
@@ -488,10 +546,13 @@ class ProbeEnvironment(Environment):
             done=done,
             reward=round(max(-1.0, min(1.0, reward)), 4),
             context_hints=list(self._episode.context_hints),
+            adversarial_hint=adversarial_hint,
             metadata={
                 "cumulative_reward": self._episode.cumulative_reward,
                 "review_decision": self._episode.review_decision,
                 "episode_id": self._episode_id,
                 "mutation_seed": task.get("_mutation_seed"),
+                "correct_classifications": self._episode.correct_classifications,
+                "escalation_required": task.get("escalation_required", False),
             },
         )

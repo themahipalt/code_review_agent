@@ -42,6 +42,8 @@ class ProbeEnv(EnvClient[ProbeAction, ProbeObservation, State]):
             payload["severity"] = action.severity.value
         if action.category is not None:
             payload["category"] = action.category.value
+        if action.classification is not None:
+            payload["classification"] = action.classification.value
         return payload
 
     def _parse_result(

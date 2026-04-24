@@ -18,7 +18,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from server.mutator import mutate_task
-from server.CodeReviewAgent_environment import EpisodeState
+from server.probe_environment import EpisodeState
 from server.tasks import TASKS
 from server.grader import CodeReviewGrader
 
@@ -160,14 +160,14 @@ class TestCausalUnlock:
         """Return a fresh environment instance fast-forwarded to task 6."""
         import asyncio
         try:
-            from server.CodeReviewAgent_environment import ProbeEnvironment
+            from server.probe_environment import ProbeEnvironment
         except ImportError:
-            from CodeReviewAgent_environment import ProbeEnvironment  # type: ignore
+            from probe_environment import ProbeEnvironment  # type: ignore
 
         env = ProbeEnvironment()
         # force-set episode to task 6 (bypass cycling for test speed)
         from server.mutator import mutate_task as _mt
-        from server.CodeReviewAgent_environment import EpisodeState
+        from server.probe_environment import EpisodeState
         task = _mt(TASK6, seed=0)
         from server.grader import CodeReviewGrader as _G
         env._grader = _G(task)
@@ -285,9 +285,9 @@ class TestGetContext:
 
     def _make_env(self):
         try:
-            from server.CodeReviewAgent_environment import ProbeEnvironment
+            from server.probe_environment import ProbeEnvironment
         except ImportError:
-            from CodeReviewAgent_environment import ProbeEnvironment  # type: ignore
+            from probe_environment import ProbeEnvironment  # type: ignore
         from server.mutator import mutate_task as _mt
         from server.grader import CodeReviewGrader as _G
         env = ProbeEnvironment()
@@ -360,9 +360,9 @@ class TestTask3CausalUnlocks:
 
     def _make_env(self):
         try:
-            from server.CodeReviewAgent_environment import ProbeEnvironment
+            from server.probe_environment import ProbeEnvironment
         except ImportError:
-            from CodeReviewAgent_environment import ProbeEnvironment  # type: ignore
+            from probe_environment import ProbeEnvironment  # type: ignore
         env = ProbeEnvironment()
         task = copy.deepcopy(self.TASK3)
         from server.grader import CodeReviewGrader as _G
@@ -443,9 +443,9 @@ class TestTask5CausalUnlocks:
 
     def _make_env(self):
         try:
-            from server.CodeReviewAgent_environment import ProbeEnvironment
+            from server.probe_environment import ProbeEnvironment
         except ImportError:
-            from CodeReviewAgent_environment import ProbeEnvironment  # type: ignore
+            from probe_environment import ProbeEnvironment  # type: ignore
         env = ProbeEnvironment()
         task = copy.deepcopy(self.TASK5)
         from server.grader import CodeReviewGrader as _G
@@ -584,9 +584,9 @@ class TestEpisodeMemory:
     def test_env_injects_prior_hint_on_second_reset(self, tmp_path):
         """After a full episode, the next reset for the same task_id must inject a hint."""
         try:
-            from server.CodeReviewAgent_environment import ProbeEnvironment
+            from server.probe_environment import ProbeEnvironment
         except ImportError:
-            from CodeReviewAgent_environment import ProbeEnvironment  # type: ignore
+            from probe_environment import ProbeEnvironment  # type: ignore
         import asyncio
 
         env = ProbeEnvironment(memory_dir=str(tmp_path))
@@ -610,9 +610,9 @@ class TestEpisodeMemory:
     def test_env_records_memory_after_submit(self, tmp_path):
         """Submitting a review with findings must persist them in EpisodeMemory."""
         try:
-            from server.CodeReviewAgent_environment import ProbeEnvironment
+            from server.probe_environment import ProbeEnvironment
         except ImportError:
-            from CodeReviewAgent_environment import ProbeEnvironment  # type: ignore
+            from probe_environment import ProbeEnvironment  # type: ignore
         import asyncio
         from models import ProbeAction, ActionType
 
@@ -657,9 +657,9 @@ class TestRunScanner:
 
     def _make_env(self, task_index: int = 1):
         try:
-            from server.CodeReviewAgent_environment import ProbeEnvironment
+            from server.probe_environment import ProbeEnvironment
         except ImportError:
-            from CodeReviewAgent_environment import ProbeEnvironment  # type: ignore
+            from probe_environment import ProbeEnvironment  # type: ignore
         env = ProbeEnvironment()
         import copy
         task = copy.deepcopy(TASKS[task_index])
@@ -804,9 +804,9 @@ class TestRunScanner:
         """RUN_SCANNER dispatched through async_step must return a valid reward."""
         import asyncio
         try:
-            from server.CodeReviewAgent_environment import ProbeEnvironment
+            from server.probe_environment import ProbeEnvironment
         except ImportError:
-            from CodeReviewAgent_environment import ProbeEnvironment  # type: ignore
+            from probe_environment import ProbeEnvironment  # type: ignore
         from models import ProbeAction, ActionType
 
         env = ProbeEnvironment()
@@ -829,9 +829,9 @@ class TestRunScanner:
         """async_state must reflect scanner_used after the action fires."""
         import asyncio
         try:
-            from server.CodeReviewAgent_environment import ProbeEnvironment
+            from server.probe_environment import ProbeEnvironment
         except ImportError:
-            from CodeReviewAgent_environment import ProbeEnvironment  # type: ignore
+            from probe_environment import ProbeEnvironment  # type: ignore
         from models import ProbeAction, ActionType
 
         env = ProbeEnvironment()

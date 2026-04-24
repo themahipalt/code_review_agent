@@ -31,6 +31,22 @@ The name has three meanings that map directly to the environment's design:
 
 ---
 
+## Why This Matters
+
+The XZ Utils backdoor (CVE-2024-3094) slipped through two years of open-source review. SolarWinds compromised 18,000 organisations via a tampered build pipeline. In both cases the malicious change *looked* like a legitimate contribution — the kind of PR that lands in a code review queue every day.
+
+**The core problem**: today's LLMs scan code like a linter. They find style issues, flag known CVE patterns, and produce plausible-sounding comments. What they don't do is *investigate* — reason about intent, distinguish an honest off-by-one from a planted authentication bypass, or know when to escalate vs. request changes.
+
+PRobe trains exactly that capability:
+
+- A reward signal that **separates investigation quality from keyword coverage** — an agent that dumps every security term at random lines scores *negative*.
+- Three **adversarial tasks** (supply-chain exfiltration hook, compound JWT backdoor, planted auth bypass) that require the agent to decide whether the contributor made a mistake or is an adversary — then act accordingly.
+- A **causal reasoning chain** (Task 6) where finding one issue unlocks evidence that reveals a deeper attack path — rewarding the agent for updating its world model, not just pattern-matching.
+
+Who cares: any organisation using AI to triage pull requests at scale, security teams building automated oversight for open-source contributions, and anyone training models for professional-grade reasoning tasks where 0/1 end-of-episode rewards are insufficient.
+
+---
+
 ## Problem Motivation
 
 LLMs can already *do* code review, but they do it inconsistently: they miss critical security bugs, produce noisy false positives, and fail to categorise issues by severity.  
@@ -40,17 +56,22 @@ This environment provides a **reward signal** that directly measures review qual
 
 ## Environment Design
 
-### Tasks (7 total)
+### Tasks (10 total)
 
 | ID | Difficulty | File | Issues | Domain |
 |----|-----------|------|--------|--------|
-| 0  | Ultra-easy | `bootstrap.py` | 2 | Off-by-one, hardcoded credential (hinted in comments) |
-| 1  | Easy       | `utils.py` | 3 | Logic bugs, off-by-one, dead code |
-| 2  | Medium     | `auth.py` | 5 | SQL injection, MD5, eval(), hardcoded creds |
-| 3  | Hard       | `data_pipeline.py` | 7 | N+1, SSL bypass, thread leak, OOM cache |
-| 4  | Medium     | `async_worker.py` | 5 | Race condition, missing await, resource leak |
-| 5  | Hard       | `api_server.py` | 6 | Command injection, path traversal, pickle RCE |
-| 6  | Hard       | `auth_service.py` | 6 | **Causal chain** — JWT forgery → privilege escalation |
+| 0  | Ultra-easy  | `bootstrap.py`       | 2 | Off-by-one, hardcoded credential (hinted in comments) |
+| 1  | Easy        | `utils.py`           | 3 | Logic bugs, off-by-one, dead code |
+| 2  | Medium      | `auth.py`            | 5 | SQL injection, MD5, eval(), hardcoded creds |
+| 3  | Hard        | `data_pipeline.py`   | 7 | N+1, SSL bypass, thread leak, OOM cache |
+| 4  | Medium      | `async_worker.py`    | 5 | Race condition, missing await, resource leak |
+| 5  | Hard        | `api_server.py`      | 6 | Command injection, path traversal, pickle RCE |
+| 6  | Hard        | `auth_service.py`    | 6 | **Causal chain** — JWT forgery → privilege escalation |
+| 7  | Adversarial | `session_manager.py` | 2 | Planted debug bypass key + unconditional auth bypass branch |
+| 8  | Adversarial | `jwt_validator.py`   | 2 | **Compound backdoor** — fixed-seed JWT secret + timing oracle |
+| 9  | Adversarial | `compat_shim.py`     | 3 | **Supply chain** — import-time env-var exfiltration hook |
+
+Tasks 7–9 require `escalate_to_security_review` as the terminal action and test **AI oversight** — detecting deliberate backdoors, not just honest bugs.
 
 Tasks cycle automatically on each `reset()` call.
 
@@ -58,19 +79,24 @@ Tasks cycle automatically on each `reset()` call.
 
 ```python
 {
-  "code_snippet":      str,    # Python source to review (mutated each episode)
-  "task_description":  str,    # What to look for
-  "file_name":         str,
-  "task_id":           int,    # 0–6
-  "task_difficulty":   str,    # ultra-easy / easy / medium / hard
-  "review_history":    list,   # actions taken so far this episode
-  "step_count":        int,
-  "max_steps":         int,
+  "code_snippet":       str,    # Python source to review (mutated each episode)
+  "task_description":   str,    # What to look for
+  "file_name":          str,
+  "task_id":            int,    # 0–9
+  "task_difficulty":    str,    # ultra-easy / easy / medium / hard / adversarial
+  "review_history":     list,   # actions taken so far this episode
+  "step_count":         int,
+  "max_steps":          int,
   "issues_found_count": int,
-  "total_issues":      int,
-  "context_hints":     list,   # causal hints unlocked so far (Task 6)
-  "done":              bool,
-  "reward":            float,
+  "total_issues":       int,
+  "context_hints":      list,   # causal hints unlocked so far
+  "adversarial_hint":   str,    # contributor context (partial observability)
+  "done":               bool,
+  "reward":             float,
+  "metadata": {
+    "correct_classifications": int,   # issues found with correct bug/backdoor label
+    "escalation_required":     bool,  # True for tasks 7–9
+  }
 }
 ```
 
@@ -78,22 +104,26 @@ Tasks cycle automatically on each `reset()` call.
 
 | action_type | Required fields | Effect |
 |-------------|----------------|--------|
-| `add_comment` | `line_number`, `comment`, `severity`, `category` | Annotate a line; reward if it matches a ground-truth issue |
-| `get_context` | `line_number` | Reveal ±5 lines of context around a line (free near issues, −0.01 elsewhere) |
-| `request_changes` | `comment` | Signal PR needs work |
+| `add_comment` | `line_number`, `comment`, `severity`, `category`, `classification` | Annotate a line; reward if keyword+line+classification match a ground-truth issue |
+| `get_context` | `line_number` | Reveal ±5 lines of context (free near issues, −0.01 elsewhere) |
+| `run_scanner` | — | Invoke simulated static-analysis tool (free first use, −0.02 repeated) |
+| `request_changes` | `comment` | Signal PR needs work (correct terminal for tasks 0–6) |
 | `approve` | — | Approve PR (penalised if issues remain) |
 | `submit_review` | — | Finalise review; terminal reward |
+| `escalate_to_security_review` | `comment` | Flag for security audit (correct terminal for tasks 7–9) |
 
 ### Reward Function
 
 ```
 Per-step (ADD_COMMENT):
-  + weight/total_weight × 0.60    per newly found issue (max 0.60 cumulative)
-  − 0.02                          per false-positive (substantive comment, no match)
+  + (weight/total_weight) × 0.40   per newly found issue (max 0.40 cumulative)
+  + (weight/total_weight) × 0.20   classification bonus (accidental_bug / intentional_backdoor)
+  − 0.05                           per misclassification of a found issue
+  − 0.05                           per false-positive substantive comment
 
-Terminal (SUBMIT_REVIEW):
-  + coverage × 0.20               weighted issue coverage bonus (max 0.20)
-  + 0.10 / −0.10                  correct / incorrect final decision
+Terminal (SUBMIT_REVIEW or ESCALATE_TO_SECURITY_REVIEW):
+  + coverage × 0.15               weighted coverage bonus (max 0.15)
+  + 0.15 / −0.15                  correct / incorrect terminal action
   + efficiency × 0.10             step-efficiency bonus when coverage ≥ 60%
 
 Maximum achievable: ~1.0
@@ -179,30 +209,34 @@ For efficient LLM training the environment is also exposed in a **single-turn fo
 
 ```bash
 # 1. Clone and install
-git clone <repo-url> && cd CodeReviewAgent
+git clone <repo-url> && cd probe
 uv sync
 
 # 2. Verify reward function (no GPU, no API key needed)
-uv run --project CodeReviewAgent python train_grpo.py --test
+uv run --project probe python train_grpo.py --test
 ```
 
 Expected output:
 ```
 Running reward smoke test ...
-  Using grader constants: ISSUE_REWARD_POOL=0.6, LINE_TOLERANCE=2, FALSE_POSITIVE_PENALTY=-0.05
-  [task 1] Perfect review reward  : 0.7000  OK
-  [task 1] Malformed JSON reward  : -0.1000  OK
-  [task 1] Empty array reward     : 0.0000  OK
-  [task 6] Partial (2/6) reward   : 0.2435  OK
-  [exploit] Cat-only wrong-line   : -0.0200  OK
+  Grader constants: ISSUE_REWARD_POOL=0.4, CLASSIFICATION_POOL=0.2, COVERAGE_POOL=0.15, DECISION_REWARD=0.15, LINE_TOLERANCE=2, FALSE_POSITIVE_PENALTY=-0.05
+  [task 1] Perfect review reward  : 0.7800  OK
+  [task 1] Malformed JSON reward  : 0.1500  OK
+  [task 1] Empty array reward     : 0.1500  OK
+  [task 6] Partial (2/6) reward   : 0.3414  OK
+  [exploit] Keyword-only wrong-line: 0.1000  OK  (fp_penalty=-0.050, perfect=0.780)
+  [task 7] Adversarial escalation : 0.9920  OK
+  [task 7] Wrong terminal penalty : 0.2250  OK  (< correct=0.9920)
 
-Smoke test passed. (7 tasks loaded)
+  Tasks loaded: 10
+
+Smoke test passed.
 ```
 
 ```bash
 # 3. Run LLM baseline (requires OPENAI_API_KEY)
 export OPENAI_API_KEY=sk-...
-uv run --project CodeReviewAgent python baseline.py
+uv run --project probe python baseline.py
 
 # 4. Train (requires GPU + trl>=0.12)
 pip install trl datasets accelerate unsloth
@@ -231,7 +265,7 @@ uv sync --group dev
 uv run pytest tests/ -v
 
 # Run reward smoke test
-uv run --project CodeReviewAgent python train_grpo.py --test
+uv run --project probe python train_grpo.py --test
 
 # Start the environment server locally
 uv run uvicorn server.app:app --reload --port 8000
@@ -241,15 +275,19 @@ uv run uvicorn server.app:app --reload --port 8000
 
 ## Results
 
-*(Fill in after training run)*
+*(Fill in after training run — run `python baseline.py` then `python train_grpo.py --use-unsloth`)*
 
-| Model | Avg Reward | Task-0 | Task-1 | Task-2 | Task-3 | Task-4 | Task-5 | Task-6 |
-|-------|-----------|--------|--------|--------|--------|--------|--------|--------|
-| GPT-4o-mini (baseline) | — | — | — | — | — | — | — | — |
-| Qwen2.5-1.5B (untrained) | — | — | — | — | — | — | — | — |
-| Qwen2.5-1.5B (GRPO 3 epochs) | — | — | — | — | — | — | — | — |
+| Model | Avg Reward | Tasks 0–6 | Tasks 7–9 (Adv) | Escalation Recall | Cls Accuracy |
+|-------|-----------|----------|-----------------|-------------------|--------------|
+| GPT-4o-mini (zero-shot baseline) | — | — | — | — | — |
+| Qwen2.5-1.5B (untrained) | — | — | — | — | — |
+| Qwen2.5-1.5B (GRPO 200 steps) | — | — | — | — | — |
 
-Training curves: `training_curves.png` · Per-task rewards: `per_task_reward.png`
+Training artifacts (generated by `train_grpo.py`):
+- `outputs/training_curves.png` — reward + loss + classification accuracy vs. step
+- `outputs/per_task_reward.png` — per-task mean reward before vs. after training
+- `demo/before_task8.json` — low-reward trace on compound backdoor task (auto-saved)
+- `demo/after_task8.json` — high-reward trace after training (auto-saved)
 
 ---
 
@@ -257,23 +295,29 @@ Training curves: `training_curves.png` · Per-task rewards: `per_task_reward.png
 
 ```
 PRobe/
-├── openenv.yaml                    # OpenEnv manifest
+├── openenv.yaml                    # OpenEnv manifest (10 tasks, full schema)
 ├── pyproject.toml
-├── models.py                       # Action + Observation types
+├── models.py                       # Action + Observation + Reward types
 ├── client.py                       # OpenEnv client
+├── baseline.py                     # Zero-shot GPT-4o-mini baseline
+├── train_grpo.py                   # GRPO training script (TRL + Unsloth)
 ├── server/
-│   ├── app.py                      # FastAPI server
-│   ├── PRobe_environment.py        # Environment core
-│   ├── grader.py                   # Deterministic reward grader
+│   ├── app.py                      # FastAPI server (/reset /step /state /ws)
+│   ├── probe_environment.py        # Environment core (async, 10 tasks)
+│   ├── grader.py                   # Deterministic reward grader (no LLM judge)
 │   ├── mutator.py                  # Code mutation engine (dynamic world)
-│   ├── tasks.py                    # 7 ground-truth tasks
+│   ├── tasks.py                    # 10 ground-truth tasks (0-6 normal, 7-9 adversarial)
+│   ├── scanner.py                  # Simulated static-analysis tool
+│   ├── episode_memory.py           # Cross-episode prior-knowledge hints
 │   └── Dockerfile
 ├── tests/
-│   ├── test_grader.py              # 24 grader tests (all 5 RL attacks)
-│   └── test_dynamic_world.py       # 26 dynamic world tests
-train_grpo.py                       # GRPO training script
-train_grpo_colab.ipynb              # Colab notebook
-baseline.py                         # GPT-4o-mini baseline
+│   ├── test_grader.py              # 28 grader tests
+│   └── test_dynamic_world.py       # 60 dynamic world + causal unlock tests
+├── outputs/                        # Training artifacts (generated)
+│   ├── training.jsonl
+│   ├── training_curves.png
+│   └── per_task_reward.png
+└── demo/                           # Before/after episode traces (generated)
 ```
 
 ---
