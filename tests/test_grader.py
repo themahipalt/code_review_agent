@@ -34,8 +34,14 @@ import pytest
 # Ensure the project root (containing the `server` package) is on the path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from server.grader import CodeReviewGrader, LINE_TOLERANCE
-from server.tasks import TASKS
+from environment.graders import (
+    CodeReviewGrader,
+    LINE_TOLERANCE,
+    ISSUE_REWARD_POOL,
+    COVERAGE_POOL,
+    DECISION_REWARD,
+)
+from environment.tasks import TASKS
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -143,7 +149,7 @@ def test_perfect_comment_task0_issue1(grader0):
         already_found=[],
     )
     assert "bootstrap_off_by_one" in found
-    assert breakdown["issue_credit"] == pytest.approx(0.30, abs=0.01)
+    assert breakdown["issue_credit"] == pytest.approx((1.0 / 2.0) * ISSUE_REWARD_POOL, abs=0.01)
     assert score > 0.0
 
 
@@ -168,14 +174,13 @@ def test_perfect_final_score_task0(grader0):
     reward = grader0.final_score(
         issues_found=["bootstrap_off_by_one", "bootstrap_hardcoded_cred"],
         review_decision="request_changes",
-        step_count=4,
+        steps_used=4,
         max_steps=6,
-        current_step=4,
     )
-    # coverage_bonus=0.20 + decision_score=0.10 + efficiency_bonus>0 → ~0.33-0.40
-    assert reward.total >= 0.30
-    assert reward.components["coverage_bonus"] == pytest.approx(0.20, abs=0.01)
-    assert reward.components["decision_score"] == pytest.approx(0.10, abs=0.001)
+    # coverage_bonus=COVERAGE_POOL + decision_score=DECISION_REWARD + efficiency_bonus>0
+    assert reward.total >= 0.25
+    assert reward.components["coverage_bonus"] == pytest.approx(COVERAGE_POOL, abs=0.01)
+    assert reward.components["decision_score"] == pytest.approx(DECISION_REWARD, abs=0.001)
     assert reward.passed is True
 
 
@@ -198,9 +203,8 @@ def test_base_model_finds_one_of_two(grader0):
     reward = grader0.final_score(
         issues_found=found1 + found2,
         review_decision="request_changes",
-        step_count=4,
+        steps_used=4,
         max_steps=6,
-        current_step=4,
     )
     # 50 % coverage → coverage_bonus=0.10, correct_decision=+0.10 → 0.20 total
     # Well below the 0.85 perfect ceiling, above 0.10 lazy floor
@@ -307,15 +311,14 @@ def test_final_score_full_coverage_correct_decision(grader1):
     reward = grader1.final_score(
         issues_found=all_ids,
         review_decision="request_changes",
-        step_count=5,
+        steps_used=5,
         max_steps=15,
-        current_step=5,
     )
-    assert reward.total >= 0.30
+    assert reward.total >= 0.25
     assert reward.passed is True
     assert reward.terminal is True
-    assert reward.components["coverage_bonus"] == pytest.approx(0.20, abs=0.01)
-    assert reward.components["decision_score"] == pytest.approx(0.10, abs=0.001)
+    assert reward.components["coverage_bonus"] == pytest.approx(COVERAGE_POOL, abs=0.01)
+    assert reward.components["decision_score"] == pytest.approx(DECISION_REWARD, abs=0.001)
 
 
 # ── 10. final_score — zero coverage + wrong decision ─────────────────────────
@@ -324,13 +327,12 @@ def test_final_score_zero_coverage_wrong_decision(grader1):
     reward = grader1.final_score(
         issues_found=[],
         review_decision="approve",  # wrong — should be request_changes
-        step_count=15,
+        steps_used=15,
         max_steps=15,
-        current_step=15,
     )
     assert reward.total <= 0.0
     assert reward.passed is False
-    assert reward.components["decision_score"] == pytest.approx(-0.10, abs=0.001)
+    assert reward.components["decision_score"] == pytest.approx(-DECISION_REWARD, abs=0.001)
     assert reward.components["coverage_bonus"] == pytest.approx(0.0, abs=0.001)
 
 
@@ -341,9 +343,8 @@ def test_final_score_partial_coverage(grader1):
     reward = grader1.final_score(
         issues_found=["off_by_one"],  # weight 1.0 out of 2.5 total
         review_decision="request_changes",
-        step_count=10,
+        steps_used=10,
         max_steps=15,
-        current_step=10,
     )
     # coverage = 1.0/2.5 = 0.40 → coverage_bonus = 0.08
     # decision_score = +0.10

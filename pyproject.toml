@@ -26,20 +26,22 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
     "pytest-cov>=4.0.0",
 ]
 
 [project.scripts]
 # Server entry point - enables running via: uv run --project . server
-server = "PRobe.server.app:main"
+server = "environment.app:main"
 
 [tool.setuptools]
 include-package-data = true
-packages = ["PRobe", "PRobe.server"]
-package-dir = { "PRobe" = ".", "PRobe.server" = "server" }
+packages = ["agent", "environment", "training"]
+package-dir = { "" = "." }
 
 [dependency-groups]
 dev = [
     "pytest>=9.0.3",
+    "pytest-asyncio>=0.23.0",
     "pytest-cov>=7.1.0",
 ]
