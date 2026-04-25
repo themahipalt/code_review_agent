@@ -732,11 +732,11 @@ def train(args: argparse.Namespace) -> None:
                     prompt_text,
                     max_length=args.max_seq_len,
                     truncation=True,
-                    return_tensors=None,
+                    return_tensors="pt",
                 )
                 yield {
-                    "input_ids": encoded["input_ids"],
-                    "attention_mask": encoded["attention_mask"],
+                    "input_ids": encoded["input_ids"].squeeze(0),
+                    "attention_mask": encoded["attention_mask"].squeeze(0),
                 }
             local_step += 1
             _curriculum_state["step"] = local_step
