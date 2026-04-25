@@ -806,6 +806,8 @@ def train(args: argparse.Namespace) -> None:
 
         rows.append(
             {
+                # GRPOTrainer expects this key for generation.
+                "prompt": prompt_text,
                 "input_ids": enc["input_ids"],
                 "attention_mask": enc.get("attention_mask", [1] * len(enc["input_ids"])),
                 "sample_id": sample_id,
@@ -814,7 +816,12 @@ def train(args: argparse.Namespace) -> None:
 
     train_dataset = Dataset.from_list(rows)
     # Return torch tensors for batching.
-    train_dataset.set_format(type="torch", columns=["input_ids", "attention_mask", "sample_id"])
+    # Keep prompt as a Python string while tensorizing model inputs.
+    train_dataset.set_format(
+        type="torch",
+        columns=["input_ids", "attention_mask", "sample_id"],
+        output_all_columns=True,
+    )
 
     # -- GRPO reward function wrapper --------------------------------------
     def grpo_reward_fn(prompts: list[str], completions: list[str], **kwargs) -> list[float]:
