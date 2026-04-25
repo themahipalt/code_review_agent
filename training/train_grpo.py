@@ -743,10 +743,18 @@ def train(args: argparse.Namespace) -> None:
                     max_length=max(64, args.max_seq_len - args.max_completion_len),
                     padding=False,
                 )
+                # Accelerate expects tensors for collation/concatenation.
+                if not _TORCH_AVAILABLE:
+                    raise RuntimeError("Torch is required for GRPO training. Please install torch.")
+                input_ids = torch.tensor(enc["input_ids"], dtype=torch.long)
+                attention_mask = torch.tensor(
+                    enc.get("attention_mask", [1] * len(enc["input_ids"])),
+                    dtype=torch.long,
+                )
                 yield {
-                    "input_ids": enc["input_ids"],
-                    "attention_mask": enc.get("attention_mask", [1] * len(enc["input_ids"])),
-                    "sample_id": s["_sample_id"],
+                    "input_ids": input_ids,
+                    "attention_mask": attention_mask,
+                    "sample_id": torch.tensor(int(s["_sample_id"]), dtype=torch.long),
                 }
             local_step += 1
             _curriculum_state["step"] = local_step
