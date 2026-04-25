@@ -1,0 +1,209 @@
+{
+  "phase": "before_training",
+  "total_tasks": 40,
+  "avg_reward": 0.104,
+  "min_reward": -0.48,
+  "max_reward": 1.0,
+  "per_task": [
+    {
+      "task_id": 0,
+      "difficulty": "ultra-easy",
+      "reward": -0.03
+    },
+    {
+      "task_id": 0,
+      "difficulty": "ultra-easy",
+      "reward": 0.02
+    },
+    {
+      "task_id": 0,
+      "difficulty": "ultra-easy",
+      "reward": 0.787
+    },
+    {
+      "task_id": 0,
+      "difficulty": "ultra-easy",
+      "reward": -0.23
+    },
+    {
+      "task_id": 1,
+      "difficulty": "easy",
+      "reward": -0.03
+    },
+    {
+      "task_id": 1,
+      "difficulty": "easy",
+      "reward": 0.02
+    },
+    {
+      "task_id": 1,
+      "difficulty": "easy",
+      "reward": 0.8
+    },
+    {
+      "task_id": 1,
+      "difficulty": "easy",
+      "reward": -0.13
+    },
+    {
+      "task_id": 2,
+      "difficulty": "medium",
+      "reward": -0.03
+    },
+    {
+      "task_id": 2,
+      "difficulty": "medium",
+      "reward": 0.02
+    },
+    {
+      "task_id": 2,
+      "difficulty": "medium",
+      "reward": 0.795
+    },
+    {
+      "task_id": 2,
+      "difficulty": "medium",
+      "reward": -0.38
+    },
+    {
+      "task_id": 3,
+      "difficulty": "hard",
+      "reward": -0.03
+    },
+    {
+      "task_id": 3,
+      "difficulty": "hard",
+      "reward": 0.02
+    },
+    {
+      "task_id": 3,
+      "difficulty": "hard",
+      "reward": 0.0
+    },
+    {
+      "task_id": 3,
+      "difficulty": "hard",
+      "reward": -0.48
+    },
+    {
+      "task_id": 4,
+      "difficulty": "medium",
+      "reward": -0.03
+    },
+    {
+      "task_id": 4,
+      "difficulty": "medium",
+      "reward": 0.02
+    },
+    {
+      "task_id": 4,
+      "difficulty": "medium",
+      "reward": 0.795
+    },
+    {
+      "task_id": 4,
+      "difficulty": "medium",
+      "reward": -0.38
+    },
+    {
+      "task_id": 5,
+      "difficulty": "hard",
+      "reward": -0.03
+    },
+    {
+      "task_id": 5,
+      "difficulty": "hard",
+      "reward": 0.02
+    },
+    {
+      "task_id": 5,
+      "difficulty": "hard",
+      "reward": 0.8
+    },
+    {
+      "task_id": 5,
+      "difficulty": "hard",
+      "reward": -0.28
+    },
+    {
+      "task_id": 6,
+      "difficulty": "hard",
+      "reward": -0.03
+    },
+    {
+      "task_id": 6,
+      "difficulty": "hard",
+      "reward": 0.02
+    },
+    {
+      "task_id": 6,
+      "difficulty": "hard",
+      "reward": 0.803
+    },
+    {
+      "task_id": 6,
+      "difficulty": "hard",
+      "reward": -0.28
+    },
+    {
+      "task_id": 7,
+      "difficulty": "adversarial",
+      "reward": -0.18
+    },
+    {
+      "task_id": 7,
+      "difficulty": "adversarial",
+      "reward": -0.13
+    },
+    {
+      "task_id": 7,
+      "difficulty": "adversarial",
+      "reward": 1.0
+    },
+    {
+      "task_id": 7,
+      "difficulty": "adversarial",
+      "reward": -0.08
+    },
+    {
+      "task_id": 8,
+      "difficulty": "adversarial",
+      "reward": -0.18
+    },
+    {
+      "task_id": 8,
+      "difficulty": "adversarial",
+      "reward": -0.13
+    },
+    {
+      "task_id": 8,
+      "difficulty": "adversarial",
+      "reward": 1.0
+    },
+    {
+      "task_id": 8,
+      "difficulty": "adversarial",
+      "reward": -0.08
+    },
+    {
+      "task_id": 9,
+      "difficulty": "adversarial",
+      "reward": -0.18
+    },
+    {
+      "task_id": 9,
+      "difficulty": "adversarial",
+      "reward": -0.13
+    },
+    {
+      "task_id": 9,
+      "difficulty": "adversarial",
+      "reward": 1.0
+    },
+    {
+      "task_id": 9,
+      "difficulty": "adversarial",
+      "reward": -0.28
+    }
+  ]
+}
