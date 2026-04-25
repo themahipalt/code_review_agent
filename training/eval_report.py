@@ -60,7 +60,7 @@ def run_random_baseline(num_episodes: int = 50) -> dict[str, Any]:
                 action = ProbeAction(
                     action_type=ActionType.ADD_COMMENT,
                     line_number=random.randint(1, 50),
-                    category=random.choice(["BUG", "SECURITY", "PERFORMANCE"]),
+                    category=random.choice(["bug", "security", "performance"]),
                     comment="Random comment " * random.randint(2, 5),
                 )
             else:
