@@ -758,12 +758,29 @@ def train(args: argparse.Namespace) -> None:
             rewards.append(float(result["total"]))
         return rewards
 
+    # -- Data collator for tokenizing prompts on-the-fly ----
+    def data_collator(batch: list[dict]) -> dict:
+        prompts = [item["prompt"] for item in batch]
+        encoded = tokenizer(
+            prompts,
+            max_length=args.max_seq_len,
+            truncation=True,
+            padding="max_length",
+            return_tensors="pt",
+        )
+        return {
+            "prompt": prompts,
+            "input_ids": encoded["input_ids"],
+            "attention_mask": encoded["attention_mask"],
+        }
+
     # -- Instantiate GRPOTrainer ONCE (outside loop) -----------------------
     trainer = GRPOTrainer(
         model=model,
         args=grpo_config,
         train_dataset=train_dataset,
         reward_funcs=grpo_reward_fn,
+        data_collator=data_collator,
     )
 
     print(f"\nStarting GRPO training for {args.steps} steps ...")
