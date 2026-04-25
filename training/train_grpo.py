@@ -728,15 +728,8 @@ def train(args: argparse.Namespace) -> None:
                 _current_task_map[sample_id] = s["task"]
             for s in samples:
                 prompt_text = f"{SYSTEM_PROMPT}\n\n{s['prompt']}"
-                encoded = tokenizer(
-                    prompt_text,
-                    max_length=args.max_seq_len,
-                    truncation=True,
-                    return_tensors="pt",
-                )
                 yield {
-                    "input_ids": encoded["input_ids"].squeeze(0),
-                    "attention_mask": encoded["attention_mask"].squeeze(0),
+                    "prompt": prompt_text,
                 }
             local_step += 1
             _curriculum_state["step"] = local_step
