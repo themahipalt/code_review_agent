@@ -714,7 +714,8 @@ def train(args: argparse.Namespace) -> None:
     # Map sample_id (stable unique key per sample) → task dict.
     # Using prompt[:200] as a key caused collisions on adversarial tasks 7/8/9
     # whose prompts share an identical ~130-char opening.
-    _current_task_map: dict[str, dict] = {}  # sample_id -> task dict
+    # NOTE: Keep this numeric so Accelerate can collate it into tensors.
+    _current_task_map: dict[int, dict] = {}  # sample_id(int) -> task dict
 
     def _curriculum_generator():
         """
@@ -728,15 +729,23 @@ def train(args: argparse.Namespace) -> None:
             samples = build_grpo_dataset(task_ids, n_per_task=n_per_task, step=local_step)
             _current_task_map.clear()
             for s in samples:
-                # Use a collision-free key: task_id + seed uniquely identifies each sample.
-                sample_id = f"{s['task_id']}:{s['seed']}"
+                # Use a collision-free *numeric* key so batching works in Accelerate.
+                # seed is already unique for each (step, task_id, i).
+                sample_id = int(s["seed"])
                 s["_sample_id"] = sample_id
                 _current_task_map[sample_id] = s["task"]
             for s in samples:
                 prompt_text = f"{SYSTEM_PROMPT}\n\n{s['prompt']}"
+                # Tokenize here so the dataloader batches tensors, not strings.
+                enc = tokenizer(
+                    prompt_text,
+                    truncation=True,
+                    max_length=max(64, args.max_seq_len - args.max_completion_len),
+                    padding=False,
+                )
                 yield {
-                    "prompt": prompt_text,
-                    # Pass-through column used by grpo_reward_fn() for task lookup.
+                    "input_ids": enc["input_ids"],
+                    "attention_mask": enc.get("attention_mask", [1] * len(enc["input_ids"])),
                     "sample_id": s["_sample_id"],
                 }
             local_step += 1
@@ -757,7 +766,14 @@ def train(args: argparse.Namespace) -> None:
             # Prefer the explicit sample_id passed through the dataset columns.
             sample_ids = kwargs.get("sample_id", [])
             sample_id = sample_ids[i] if i < len(sample_ids) else None
-            task = _current_task_map.get(sample_id) if sample_id else None
+            # sample_id may be a tensor on some stacks (Accelerate).
+            if hasattr(sample_id, "item"):
+                sample_id = sample_id.item()
+            try:
+                sample_id_int = int(sample_id) if sample_id is not None else None
+            except (TypeError, ValueError):
+                sample_id_int = None
+            task = _current_task_map.get(sample_id_int) if sample_id_int is not None else None
             if task is None:
                 log.warning("grpo_reward_fn: task lookup miss for sample_id=%r", sample_id)
                 rewards.append(0.0)
