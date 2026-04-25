@@ -760,12 +760,61 @@ def train(args: argparse.Namespace) -> None:
             _curriculum_state["step"] = local_step
 
     try:
-        from datasets import IterableDataset
+        from datasets import Dataset
     except ImportError:
         print("ERROR: pip install datasets")
         sys.exit(1)
 
-    train_dataset = IterableDataset.from_generator(_curriculum_generator)
+    # -------------------------------------------------------------------
+    # Build a *finite* Dataset (GRPOTrainer doesn't support IterableDataset
+    # on some TRL versions shipped in Kaggle).
+    #
+    # We pre-tokenize AND pad to fixed length so Accelerate can collate
+    # without needing a custom data collator.
+    # -------------------------------------------------------------------
+    if not _TORCH_AVAILABLE:
+        raise RuntimeError("Torch is required for GRPO training. Please install torch.")
+
+    global_batch = max(1, int(args.batch_size) * int(args.grad_accum))
+    n_prompts = int(args.steps) * global_batch
+    prompt_max_len = max(64, int(args.max_seq_len) - int(args.max_completion_len))
+
+    rows: list[dict[str, Any]] = []
+    _current_task_map.clear()
+    base_step = int(_curriculum_state["step"])
+
+    for idx in range(n_prompts):
+        virtual_step = base_step + (idx // global_batch)
+        _, task_ids = _get_phase(virtual_step)
+        task_id = random.choice(task_ids)
+        # Match build_grpo_dataset seed scheme but ensure uniqueness.
+        seed = virtual_step * 1000 + task_id * 100 + (idx % 100)
+        task = mutate_task(TASKS[task_id], seed=seed)
+        task["_mutation_seed"] = seed
+        prompt = _build_prompt(task)
+        prompt_text = f"{SYSTEM_PROMPT}\n\n{prompt}"
+
+        sample_id = int(seed)
+        _current_task_map[sample_id] = task
+
+        enc = tokenizer(
+            prompt_text,
+            truncation=True,
+            max_length=prompt_max_len,
+            padding="max_length",
+        )
+
+        rows.append(
+            {
+                "input_ids": enc["input_ids"],
+                "attention_mask": enc.get("attention_mask", [1] * len(enc["input_ids"])),
+                "sample_id": sample_id,
+            }
+        )
+
+    train_dataset = Dataset.from_list(rows)
+    # Return torch tensors for batching.
+    train_dataset.set_format(type="torch", columns=["input_ids", "attention_mask", "sample_id"])
 
     # -- GRPO reward function wrapper --------------------------------------
     def grpo_reward_fn(prompts: list[str], completions: list[str], **kwargs) -> list[float]:
