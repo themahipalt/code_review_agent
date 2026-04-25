@@ -897,7 +897,8 @@ def train(args: argparse.Namespace) -> None:
                 **inputs, max_new_tokens=args.max_completion_len,
                 temperature=0.3, do_sample=True, pad_token_id=tokenizer.pad_token_id,
             )
-        raw = tokenizer.decode(out_ids[0][inputs.shape[-1]:], skip_special_tokens=True)
+        prompt_len = inputs["input_ids"].shape[-1]
+        raw = tokenizer.decode(out_ids[0][prompt_len:], skip_special_tokens=True)
         result = compute_reward(task, raw, seed=seed)
 
         issues_with_cls = sum(1 for iss in task["issues"] if "classification" in iss)
